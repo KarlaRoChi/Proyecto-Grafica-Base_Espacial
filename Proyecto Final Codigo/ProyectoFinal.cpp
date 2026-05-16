@@ -26,7 +26,6 @@
 #include <animatedmodel.h>
 #include <light.h>
 #include <cubemap.h>
-#include <text_renderer.h>
 
 // ============ FORWARD DECLARATIONS ============
 bool Start();
@@ -46,9 +45,6 @@ void DrawCharacter(const glm::mat4& projection, const glm::mat4& view);
 bool CheckCollision(glm::vec3 pos, float radius, int zone);
 void ChangeZone(int z);
 void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase);
-void ResetZoneGame(int z);
-void TickZoneGame(int z, float dt, float t);
-std::string InstruccionesZona(int z);
 
 // ============ TIPOS ============
 enum CameraMode { CAM_FREE = 0, CAM_FIRST = 1, CAM_SECOND = 2, CAM_THIRD = 3 };
@@ -80,19 +76,6 @@ struct InteractiveBox {
     glm::vec3 startPos;
     float rotationY = 0.0f;
     float scale = 1.0f;
-};
-
-// ============ ESTADO DE MINIJUEGO POR ZONA ============
-enum ZoneGameState { ZG_NOT_STARTED, ZG_INSTRUCTIONS, ZG_PLAYING, ZG_COMPLETED };
-
-struct ZoneGame {
-    ZoneGameState state = ZG_NOT_STARTED;
-    int   progress     = 0;
-    int   target       = 0;
-    float timer        = 0.0f;
-    float rewardTimer  = 0.0f;
-    int   extraInt[8]  = { 0,0,0,0,0,0,0,0 };
-    float extraFloat[8] = { 0,0,0,0,0,0,0,0 };
 };
 
 
@@ -258,15 +241,6 @@ Room rooms[5];
 std::vector<AABB> autoColliders[5];
 InteractiveBox interactiveBoxes[5];
 
-// Minijuegos por zona
-ZoneGame zoneGames[5];
-
-// Recursos del minijuego de RECICLAJE
-glm::vec3 binPositions[3];
-glm::vec4 boxTypeColors[3];
-
-// Tipos de caja (visible para el render): 0=metal, 1=carton, 2=vidrio
-
 bool keyFLast = false;
 bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false;
 bool keyZoneLast[5] = { false, false, false, false, false };
@@ -285,75 +259,12 @@ unsigned int trailVBO = 0;
 int moonTrailMode = 0; // 0 = cyan, 1 = magenta, 2 = yellow
 float trailEmitTimer = 0.0f;
 
-// ============ HUD (TEXTO EN PANTALLA) ============
-namespace HUD {
-    static TextRenderer* tr = nullptr;
-    static std::string  gInstruction;
-    static std::string  gPersistent;
-    static std::string  gZoneBanner;
-    static float gInstructionTimer = 0.0f;
-    static float gZoneTimer        = 0.0f;
-    static glm::vec3 gInstructionColor = glm::vec3(0.55f, 0.95f, 1.0f);
-    static int sw = 1280, sh = 720;
-
-    void Init(int screenW, int screenH) {
-        sw = screenW; sh = screenH;
-        if (!tr) tr = new TextRenderer();
-        if (!tr->Init("fonts/JetBrainsMono-Bold.ttf", 36,
-                      "shaders/text.vs", "shaders/text.fs",
-                      screenW, screenH)) {
-            std::cout << "[HUD] Init FAILED: revisa fonts/JetBrainsMono-Bold.ttf y shaders/text.vs/.fs" << std::endl;
-        }
-    }
-    void ShowInstruction(const std::string& text, float seconds) {
-        gInstruction = text;
-        gInstructionTimer = seconds;
-        gInstructionColor = glm::vec3(0.55f, 0.95f, 1.0f);
-    }
-    void ShowInstructionColored(const std::string& text, float seconds, glm::vec3 color) {
-        gInstruction = text;
-        gInstructionTimer = seconds;
-        gInstructionColor = color;
-    }
-    void ShowPersistent(const std::string& text) { gPersistent = text; }
-    void ShowZoneBanner(const std::string& zoneName) {
-        gZoneBanner = zoneName;
-        gZoneTimer  = 3.0f;
-    }
-    void Tick(float dt) {
-        if (gInstructionTimer > 0.0f) gInstructionTimer -= dt;
-        if (gZoneTimer        > 0.0f) gZoneTimer        -= dt;
-    }
-    void DrawFrame() {
-        if (!tr || !tr->ready) return;
-        if (!gPersistent.empty()) {
-            tr->RenderText(gPersistent, 20.0f, 24.0f, 0.55f, glm::vec3(1.0f, 1.0f, 1.0f));
-        }
-        if (gZoneTimer > 0.0f && !gZoneBanner.empty()) {
-            float scale = 1.1f;
-            float w = tr->MeasureWidth(gZoneBanner, scale);
-            tr->RenderText(gZoneBanner, (sw - w) * 0.5f, (float)sh - 80.0f, scale,
-                           glm::vec3(1.0f, 0.85f, 0.25f));
-        }
-        if (gInstructionTimer > 0.0f && !gInstruction.empty()) {
-            float scale = 0.7f;
-            float w = tr->MeasureWidth(gInstruction, scale);
-            tr->RenderText(gInstruction, (sw - w) * 0.5f, (float)sh * 0.5f, scale,
-                           gInstructionColor);
-        }
-    }
-    void Shutdown() {
-        if (tr) { tr->Shutdown(); delete tr; tr = nullptr; }
-    }
-}
-
 // ============ MAIN ============
 int main() {
     if (!Start()) return -1;
     while (!glfwWindowShouldClose(window)) {
         if (!Update()) break;
     }
-    HUD::Shutdown();
     glfwTerminate();
     return 0;
 }
@@ -425,22 +336,22 @@ void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
     side = glm::normalize(side);
     glm::vec3 up = glm::normalize(glm::cross(side, forward));
 
-    // Mï¿½s partï¿½culas, mï¿½s compactas, sin efecto resorte
+    // Más partículas, más compactas, sin efecto resorte
     for (int i = 0; i < 70; i++) {
 
         float r = (float)rand() / RAND_MAX;
         float r2 = (float)rand() / RAND_MAX;
 
-        // dispersiï¿½n orgï¿½nica
+        // dispersión orgánica
         float spread = 0.18f + r * 0.75f;
 
         float offsetSide = ((float)rand() / RAND_MAX - 0.5f) * spread;
         float offsetUp = ((float)rand() / RAND_MAX - 0.5f) * spread;
 
-        // ligera elongaciï¿½n horizontal
+        // ligera elongación horizontal
         offsetSide *= 1.35f;
 
-        TrailParticle p;  // <-- FALTABA ESTA Lï¿½NEA
+        TrailParticle p;  // <-- FALTABA ESTA LÍNEA
 
         p.pos = pos + side * offsetSide + up * offsetUp;
 
@@ -532,14 +443,6 @@ void InitRooms() {
         interactiveBoxes[i].rotationY = 0.0f;
         interactiveBoxes[i].scale = 1.0f;
     }
-
-    // Botes de RECICLAJE: metal, carton, vidrio
-    binPositions[0] = glm::vec3(11.7f, 0.2f, -2.5f);
-    binPositions[1] = glm::vec3(11.7f, 0.2f,  0.0f);
-    binPositions[2] = glm::vec3(11.7f, 0.2f,  2.5f);
-    boxTypeColors[0] = glm::vec4(0.65f, 0.70f, 0.75f, 1.0f); // metal (gris-azulado)
-    boxTypeColors[1] = glm::vec4(0.70f, 0.45f, 0.20f, 1.0f); // carton (marron)
-    boxTypeColors[2] = glm::vec4(0.30f, 0.75f, 0.55f, 1.0f); // vidrio (verde-cian)
 }
 
 bool CheckCollision(glm::vec3 pos, float radius, int zone) {
@@ -566,178 +469,6 @@ void ChangeZone(int z) {
 
     moonTrail.clear();
     trailEmitTimer = 0.0f;
-
-    HUD::ShowZoneBanner(rooms[z].name);
-    HUD::ShowInstruction(InstruccionesZona(z), 5.0f);
-
-    if (zoneGames[z].state != ZG_COMPLETED) {
-        ResetZoneGame(z);
-        zoneGames[z].state = ZG_PLAYING;
-    }
-}
-
-std::string InstruccionesZona(int z) {
-    switch (z) {
-    case 0: return "Bienvenida, cadete. Pulsa 1-4 para visitar zonas.";
-    case 1: return "INVERNADERO: cuando aparezca RIEGA AHORA, acercate al bebedero y pulsa R.";
-    case 2: return "RECICLAJE: pulsa E cerca de una caja para agarrarla. Llevala al bote correcto.";
-    case 3: return "ENERGIA: memoriza la secuencia de luces y replicala con las teclas 1-4.";
-    case 4: return "CAPSULAS: acercate y pulsa O (oxigeno), T (temperatura) o P (presion).";
-    }
-    return "";
-}
-
-void ResetZoneGame(int z) {
-    ZoneGame& g = zoneGames[z];
-    g.progress = 0;
-    g.timer = 0.0f;
-    g.rewardTimer = 0.0f;
-    for (int i = 0; i < 8; i++) { g.extraInt[i] = 0; g.extraFloat[i] = 0.0f; }
-
-    switch (z) {
-    case 1: // INVERNADERO: regado por turnos
-        g.target = 4;
-        g.extraInt[0] = 0;   // fase: 0=esperando, 1=ventana abierta, 2=victoria
-        g.timer = 3.0f;
-        fractalIteration = 0;
-        if (miPlantaFractal) miPlantaFractal->Generate(0);
-        break;
-
-    case 2: // RECICLAJE: ordenar cajas
-        g.target = 3;
-        for (int i = 0; i < 3; i++) {
-            g.extraInt[i]     = rand() % 3; // tipo de cada caja
-            g.extraInt[3 + i] = 0;          // estado: libre
-        }
-        g.extraInt[6] = -1; // ninguna agarrada
-        // Reposicionar cajas del minijuego cerca del jugador
-        for (int i = 0; i < 3; i++) {
-            interactiveBoxes[i].position = glm::vec3(7.0f + (i * 0.6f), 0.1f, -1.5f + i * 1.2f);
-            interactiveBoxes[i].rotationY = 0.0f;
-            interactiveBoxes[i].scale = 1.0f;
-        }
-        break;
-
-    case 3: // ENERGIA: Simon Says
-        g.target = 3; // longitud de secuencia
-        for (int i = 0; i < g.target; i++) g.extraInt[i] = rand() % 4;
-        g.extraInt[5] = 0;   // fase: 0=playback, 1=input, 2=error, 3=victoria
-        g.extraInt[6] = 0;   // indice del boton iluminado en playback
-        g.timer = 0.6f;
-        break;
-
-    case 4: // CAPSULAS: diagnostico medico
-        g.target = 3;
-        for (int i = 0; i < 3; i++) {
-            g.extraInt[i]     = rand() % 3; // sintoma
-            g.extraInt[3 + i] = 0;          // 0=enferma, 1=curada
-        }
-        break;
-    }
-}
-
-void TickZoneGame(int z, float dt, float t) {
-    ZoneGame& g = zoneGames[z];
-
-    if (g.rewardTimer > 0.0f) g.rewardTimer -= dt;
-
-    // HUD persistente por zona
-    {
-        std::ostringstream ss;
-        if (z >= 0 && z < 5) ss << "[" << rooms[z].name << "]  ";
-        switch (z) {
-        case 0: ss << "Pulsa 1-4 para visitar las zonas.  F1-F4: camara.";
-                break;
-        case 1: ss << "Riegos: " << g.progress << "/" << g.target
-                   << "   " << (g.extraInt[0] == 1 ? "RIEGA AHORA (R)" : "Esperando senal...");
-                break;
-        case 2: ss << "Cajas: " << g.progress << "/" << g.target
-                   << "   " << (g.extraInt[6] >= 0 ? "[caja agarrada]  E para soltar" : "E para agarrar");
-                break;
-        case 3: {
-            const char* fase = "";
-            switch (g.extraInt[5]) {
-            case 0: fase = "Memoriza la secuencia..."; break;
-            case 1: fase = "Replica con 1-4"; break;
-            case 2: fase = "FALLASTE - reintentando"; break;
-            case 3: fase = "REACTOR ESTABLE!"; break;
-            }
-            ss << "Memoria: " << g.progress << "/" << g.target << "   " << fase;
-        } break;
-        case 4: ss << "Capsulas: " << g.progress << "/" << g.target
-                   << "   Rojo=O  Amarillo=T  Azul=P";
-                break;
-        }
-        if (g.state == ZG_COMPLETED) ss << "   COMPLETADO";
-        HUD::ShowPersistent(ss.str());
-    }
-
-    if (g.state != ZG_PLAYING) return;
-
-    switch (z) {
-    case 1: { // INVERNADERO
-        g.timer -= dt;
-        if (g.extraInt[0] == 0 && g.timer <= 0.0f) {
-            g.extraInt[0] = 1;
-            g.timer = 2.5f;
-        } else if (g.extraInt[0] == 1 && g.timer <= 0.0f) {
-            g.extraInt[0] = 0;
-            g.timer = 3.0f;
-        }
-        if (g.progress >= g.target) {
-            g.state = ZG_COMPLETED;
-            g.rewardTimer = 2.0f;
-            HUD::ShowInstructionColored("INVERNADERO SALUDABLE!", 3.0f, glm::vec3(0.4f, 1.0f, 0.5f));
-        }
-    } break;
-
-    case 2: { // RECICLAJE
-        int held = g.extraInt[6];
-        if (held >= 0 && held < 3) {
-            glm::vec3 fwd(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
-            interactiveBoxes[held].position = player.position + fwd * 0.7f + glm::vec3(0.0f, 0.9f, 0.0f);
-        }
-        if (g.progress >= g.target) {
-            g.state = ZG_COMPLETED;
-            g.rewardTimer = 2.0f;
-            HUD::ShowInstructionColored("RECICLAJE COMPLETO!", 3.0f, glm::vec3(0.4f, 1.0f, 0.5f));
-        }
-    } break;
-
-    case 3: { // ENERGIA - Simon Says
-        g.timer -= dt;
-        if (g.extraInt[5] == 0) { // playback
-            if (g.timer <= 0.0f) {
-                g.extraInt[6]++;
-                if (g.extraInt[6] >= g.target) {
-                    g.extraInt[5] = 1;     // pasar a esperar input
-                    g.extraInt[6] = 0;
-                    g.progress = 0;
-                    g.timer = 0.0f;
-                } else {
-                    g.timer = 0.6f;
-                }
-            }
-        } else if (g.extraInt[5] == 2) { // error
-            if (g.timer <= 0.0f) {
-                ResetZoneGame(3);
-                g.state = ZG_PLAYING;
-            }
-        } else if (g.extraInt[5] == 3) { // victoria
-            if (g.rewardTimer <= 0.0f) {
-                g.state = ZG_COMPLETED;
-            }
-        }
-    } break;
-
-    case 4: { // CAPSULAS
-        if (g.progress >= g.target) {
-            g.state = ZG_COMPLETED;
-            g.rewardTimer = 2.0f;
-            HUD::ShowInstructionColored("TRIPULACION ESTABLE!", 3.0f, glm::vec3(0.4f, 1.0f, 0.5f));
-        }
-    } break;
-    }
 }
 
 // ============ START ============
@@ -768,8 +499,6 @@ bool Start() {
     proceduralShader = new Shader("shaders/12_ProceduralAnimation.vs", "shaders/12_ProceduralAnimation.fs");
     wavesShader = new Shader("shaders/13_wavesAnimation.vs", "shaders/13_wavesAnimation.fs");
     trailShader = new Shader("shaders/trail.vs", "shaders/trail.fs");
-
-    HUD::Init(SCR_WIDTH, SCR_HEIGHT);
 
     glGenVertexArrays(1, &trailVAO);
     glGenBuffers(1, &trailVBO);
@@ -949,9 +678,6 @@ bool Update() {
     processInput(window);
     UpdateCharacter(deltaTime);
 
-    HUD::Tick(deltaTime);
-    TickZoneGame(currentZone, deltaTime, t);
-
     // Resetear luces extras por defecto
     if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
     if (gLights.size() > 3) gLights[3].Power = glm::vec4(0.0f);
@@ -980,99 +706,54 @@ bool Update() {
             gLights[0].distance = 15.0f;
             break;
 
-        case 3: { // ENERGIA
+        case 3: // ENERGIA
             gLights[0].Position = glm::vec3(0.0f, 4.0f, 10.0f);
+            gLights[0].Color = glm::vec4(1.0f, 0.55f, 0.25f, 1.0f);
+            gLights[0].Power = glm::vec4(7.0f);
             gLights[0].distance = 16.0f;
 
-            // Colores por boton (0=1, 1=2, 2=3, 3=4)
-            glm::vec4 btnColors[4] = {
-                glm::vec4(1.00f, 0.25f, 0.20f, 1.0f), // rojo
-                glm::vec4(0.30f, 1.00f, 0.35f, 1.0f), // verde
-                glm::vec4(0.30f, 0.55f, 1.00f, 1.0f), // azul
-                glm::vec4(1.00f, 0.95f, 0.30f, 1.0f), // amarillo
-            };
-
-            ZoneGame& g = zoneGames[3];
-            if (g.state == ZG_PLAYING && g.extraInt[5] == 0) {
-                // Playback: ilumina el boton de la secuencia
-                int idx = g.extraInt[6];
-                if (idx < 0) idx = 0;
-                if (idx >= g.target) idx = g.target - 1;
-                int btn = g.extraInt[idx];
-                if (btn < 0 || btn > 3) btn = 0;
-                float flash = (g.timer > 0.3f) ? 1.0f : 0.15f;
-                gLights[0].Color = btnColors[btn];
-                gLights[0].Power = glm::vec4(10.0f * flash);
-            } else if (g.state == ZG_PLAYING && g.extraInt[5] == 2) {
-                // Error: parpadeo rojo intenso
-                float blink = (sinf(t * 14.0f) > 0.0f) ? 1.0f : 0.2f;
-                gLights[0].Color = glm::vec4(1.0f, 0.15f, 0.1f, 1.0f);
-                gLights[0].Power = glm::vec4(12.0f * blink);
-            } else if (g.state == ZG_COMPLETED || (g.state == ZG_PLAYING && g.extraInt[5] == 3)) {
-                // Victoria / completado: pulso verde
-                float pulse = 0.6f + 0.4f * sinf(t * 4.0f);
-                gLights[0].Color = glm::vec4(0.45f, 1.0f, 0.55f, 1.0f);
-                gLights[0].Power = glm::vec4(10.0f * pulse);
-            } else {
-                // Esperando input o sin jugar: luz calida base
-                gLights[0].Color = glm::vec4(1.0f, 0.55f, 0.25f, 1.0f);
-                gLights[0].Power = glm::vec4(7.0f);
-            }
-
-            // Reactor parpadeante (decorativo, sin cambios)
             if (gLights.size() > 2) {
                 float fastBlink = (sinf(t * 11.0f) > 0.0f) ? 1.0f : 0.15f;
                 float slowPulse = 0.6f + 0.4f * sinf(t * 2.3f);
                 float power = 14.0f * fastBlink * slowPulse;
+
                 float warm = 0.5f + 0.5f * sinf(t * 1.7f);
                 glm::vec4 col = glm::mix(
                     glm::vec4(0.30f, 0.85f, 1.00f, 1.0f),
                     glm::vec4(0.85f, 0.95f, 1.00f, 1.0f),
                     warm
                 );
+
                 gLights[2].Position = glm::vec3(0.0f, 2.25f, 10.0f);
                 gLights[2].Color = col;
                 gLights[2].Power = glm::vec4(power);
                 gLights[2].distance = 9.0f;
             }
-        } break;
+            break;
 
-        case 4: { // CAPSULAS - diagnostico medico
-            glm::vec3 capsPos[3] = {
-                glm::vec3(-10.75f, 4.5f, 0.0f),
-                glm::vec3(-7.5f,  4.5f, 0.0f),
-                glm::vec3(-14.0f, 4.5f, 0.0f)
-            };
-            int lightIdx[3] = { 0, 3, 4 };
-            glm::vec4 syntColors[3] = {
-                glm::vec4(1.0f, 0.20f, 0.15f, 1.0f), // rojo  -> O (oxigeno)
-                glm::vec4(1.0f, 0.90f, 0.20f, 1.0f), // amarillo -> T (temperatura)
-                glm::vec4(0.30f, 0.50f, 1.00f, 1.0f) // azul  -> P (presion)
-            };
-            ZoneGame& g4 = zoneGames[4];
-            for (int i = 0; i < 3; i++) {
-                int li = lightIdx[i];
-                if ((size_t)li >= gLights.size()) continue;
-                gLights[li].Position = capsPos[i];
-                gLights[li].distance = 10.0f;
-                if (g4.state == ZG_PLAYING && g4.extraInt[3 + i] == 0) {
-                    int s = g4.extraInt[i];
-                    float blink = (sinf(t * 5.0f + i) > 0.0f) ? 1.0f : 0.25f;
-                    gLights[li].Color = syntColors[s];
-                    gLights[li].Power = glm::vec4(6.0f * blink);
-                } else if (g4.state == ZG_PLAYING && g4.extraInt[3 + i] == 1) {
-                    gLights[li].Color = glm::vec4(0.5f, 1.0f, 0.6f, 1.0f);
-                    gLights[li].Power = glm::vec4(5.0f);
-                } else if (g4.state == ZG_COMPLETED) {
-                    float pulse = 0.6f + 0.4f * sinf(t * 4.0f);
-                    gLights[li].Color = glm::vec4(0.45f, 1.0f, 0.55f, 1.0f);
-                    gLights[li].Power = glm::vec4(6.0f * pulse);
-                } else {
-                    gLights[li].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
-                    gLights[li].Power = glm::vec4(4.0f);
-                }
+        case 4: // CAPSULAS (3 Luces en el pasillo)
+            // Luz Central
+            gLights[0].Position = glm::vec3(-10.75f, 4.5f, 0.0f);
+            gLights[0].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+            gLights[0].Power = glm::vec4(4.0f);
+            gLights[0].distance = 10.0f;
+
+            // Luz Este (Entrada)
+            if (gLights.size() > 3) {
+                gLights[3].Position = glm::vec3(-7.5f, 4.5f, 0.0f);
+                gLights[3].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+                gLights[3].Power = glm::vec4(4.0f);
+                gLights[3].distance = 10.0f;
             }
-        } break;
+
+            // Luz Oeste (Fondo)
+            if (gLights.size() > 4) {
+                gLights[4].Position = glm::vec3(-14.0f, 4.5f, 0.0f);
+                gLights[4].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+                gLights[4].Power = glm::vec4(4.0f);
+                gLights[4].distance = 10.0f;
+            }
+            break;
         }
     }
 
@@ -1101,11 +782,12 @@ bool Update() {
     glm::vec4 specOpaque = glm::vec4(0.40f, 0.40f, 0.40f, 1.0f);
     int alphaOpaque = 32;
 
-    // Metales pulidos
-    glm::vec4 ambMetal = glm::vec4(0.7f, 0.7f, 0.7f, 1.0f);
-    glm::vec4 diffMetal = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
-    glm::vec4 specMetal = glm::vec4(3.0f, 3.0f, 3.0f, 1.0f);
-    int alphaMetal = 256;
+
+    glm::vec4 ambMetal = glm::vec4(0.03f, 0.03f, 0.03f, 1.0f);
+    glm::vec4 diffMetal = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
+    glm::vec4 specMetal = glm::vec4(12.0f, 12.0f, 12.0f, 1.0f);
+    int alphaMetal = 2048;
+
 
     switch (currentZone) {
     case 0: // HUB
@@ -1142,7 +824,7 @@ bool Update() {
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
 
-        // ---- ESTELA DEL COMETA (mï¿½s visible) ----
+        // ---- ESTELA DEL COMETA (más visible) ----
         if (MOON2 && proceduralShader) {
             proceduralShader->use();
             proceduralShader->setMat4("projection", projection);
@@ -1164,7 +846,7 @@ bool Update() {
 
             MOON2->Draw(*proceduralShader);
 
-            // Posiciï¿½n del cometa en el mundo
+            // Posición del cometa en el mundo
             glm::vec3 moonLocalPos(
                 moonRadius * cosf(moonTime),
                 moonRadius * sinf(moonTime),
@@ -1221,8 +903,14 @@ bool Update() {
                 }
 
                 glBindVertexArray(0);
+
                 glEnable(GL_DEPTH_TEST);
+
+                glDepthMask(GL_TRUE);
+
                 glDisable(GL_BLEND);
+
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             }
         }
 
@@ -1269,46 +957,15 @@ bool Update() {
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
         if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
 
-        // ====== BOTES DE CATEGORIA (3 marcadores en el piso) ======
+        // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
         if (CAJA_MODELO) {
-            for (int b = 0; b < 3; b++) {
-                glm::vec4 c = boxTypeColors[b];
-                glm::vec4 amb = c * 0.35f; amb.a = 1.0f;
-                glm::vec4 diff = c;        diff.a = 1.0f;
-                glm::vec4 spec = glm::vec4(0.4f, 0.4f, 0.4f, 1.0f);
-                SetMaterial(phongShader, amb, diff, spec, 16);
-
-                glm::mat4 m(1.0f);
-                m = glm::translate(m, binPositions[b]);
-                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-                m = glm::scale(m, glm::vec3(0.9f, 0.9f, 1.4f));
-                phongShader->setMat4("model", m);
-                CAJA_MODELO->Draw(*phongShader);
-            }
-        }
-
-        // ====== CAJAS INTERACTIVAS ======
-        if (CAJA_MODELO) {
+            SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
             for (int i = 0; i < 5; i++) {
-                bool esDelMinijuego = (i < 3);
-                if (esDelMinijuego && zoneGames[2].state == ZG_PLAYING) {
-                    int tipo = zoneGames[2].extraInt[i];
-                    int est  = zoneGames[2].extraInt[3 + i];
-                    glm::vec4 c = boxTypeColors[tipo];
-                    glm::vec4 amb = c * 0.40f; amb.a = 1.0f;
-                    glm::vec4 diff = c;        diff.a = 1.0f;
-                    glm::vec4 spec = (est == 1)
-                        ? glm::vec4(1.5f, 1.5f, 1.5f, 1.0f)   // agarrada -> mas brillante
-                        : glm::vec4(0.5f, 0.5f, 0.5f, 1.0f);
-                    SetMaterial(phongShader, amb, diff, spec, (est == 1) ? 128 : 32);
-                } else {
-                    SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
-                }
-
                 glm::mat4 m(1.0f);
                 m = glm::translate(m, interactiveBoxes[i].position);
                 m = glm::rotate(m, interactiveBoxes[i].rotationY, glm::vec3(0.0f, 1.0f, 0.0f));
                 m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                // Escala base ajustada a 0.5f, multiplicada por su escala interactiva
                 m = glm::scale(m, glm::vec3(0.5f * interactiveBoxes[i].scale));
 
                 phongShader->setMat4("model", m);
@@ -1332,8 +989,6 @@ bool Update() {
 
     DrawCharacter(projection, view);
 
-    HUD::DrawFrame();
-
     glfwSwapBuffers(window);
     glfwPollEvents();
     return true;
@@ -1344,7 +999,7 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    // 1. Controles universales: Cï¿½mara Libre
+    // 1. Controles universales: Cámara Libre
     if (cameraMode == CAM_FREE) {
         if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard(FORWARD, deltaTime);
         if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard(BACKWARD, deltaTime);
@@ -1352,7 +1007,7 @@ void processInput(GLFWwindow* window) {
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard(RIGHT, deltaTime);
     }
 
-    // 2. Controles universales: Cambio de Cï¿½maras
+    // 2. Controles universales: Cambio de Cámaras
     bool f1 = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
     bool f2 = glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS;
     bool f3 = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
@@ -1373,13 +1028,6 @@ void processInput(GLFWwindow* window) {
     int zoneKeysKP[5] = { GLFW_KEY_KP_0, GLFW_KEY_KP_1, GLFW_KEY_KP_2, GLFW_KEY_KP_3, GLFW_KEY_KP_4 };
 
     for (int i = 0; i < 5; ++i) {
-        // Durante Simon Says, las teclas 1-4 son del minijuego, no del teletransporte.
-        // La tecla 0 sigue funcionando para volver al HUB.
-        if (currentZone == 3 && zoneGames[3].state == ZG_PLAYING && i >= 1 && i <= 4) {
-            keyZoneLast[i] = (glfwGetKey(window, zoneKeys[i]) == GLFW_PRESS) ||
-                             (glfwGetKey(window, zoneKeysKP[i]) == GLFW_PRESS);
-            continue;
-        }
         bool now = (glfwGetKey(window, zoneKeys[i]) == GLFW_PRESS) ||
             (glfwGetKey(window, zoneKeysKP[i]) == GLFW_PRESS);
 
@@ -1437,28 +1085,6 @@ void processInput(GLFWwindow* window) {
         cLast = cKey;
         mLast = mKey;
         yLast = yKey;
-
-        // ====== MINIJUEGO: regado por turnos ======
-        static bool rLastInv = false;
-        bool rKey = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
-        if (rKey && !rLastInv &&
-            zoneGames[1].state == ZG_PLAYING &&
-            zoneGames[1].extraInt[0] == 1) {
-            glm::vec3 bebPos(5.0f, 0.0f, -10.1f);
-            if (glm::distance(player.position, bebPos) < 2.2f) {
-                zoneGames[1].progress++;
-                if (fractalIteration < 7) {
-                    fractalIteration++;
-                    if (miPlantaFractal) miPlantaFractal->Generate(fractalIteration);
-                }
-                zoneGames[1].extraInt[0] = 0;
-                zoneGames[1].timer = 3.0f;
-                HUD::ShowInstructionColored("Bien regado!", 1.2f, glm::vec3(0.4f, 1.0f, 0.6f));
-            } else {
-                HUD::ShowInstructionColored("Acercate al bebedero", 1.2f, glm::vec3(1.0f, 0.7f, 0.3f));
-            }
-        }
-        rLastInv = rKey;
     }
     else {
         keyPLast = false;
@@ -1466,153 +1092,40 @@ void processInput(GLFWwindow* window) {
     }
 
     // ZONA 2: RECICLAJE
+    // Controles directos e individuales de cada caja
     if (currentZone == 2) {
-        // Controles libres de cajas solo cuando el minijuego NO esta activo
-        if (zoneGames[2].state != ZG_PLAYING) {
-            float boxSpeed = 2.5f * deltaTime;
-            if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) interactiveBoxes[0].rotationY -= boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) interactiveBoxes[0].rotationY += boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) interactiveBoxes[1].position.y += boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) interactiveBoxes[1].position.y -= boxSpeed;
-            if (interactiveBoxes[1].position.y < 0.0f) interactiveBoxes[1].position.y = 0.0f;
-            if (interactiveBoxes[1].position.y > 3.0f) interactiveBoxes[1].position.y = 3.0f;
-            if (glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS) interactiveBoxes[2].position.x -= boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS) interactiveBoxes[2].position.x += boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) interactiveBoxes[3].position.z -= boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) interactiveBoxes[3].position.z += boxSpeed;
-            if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) interactiveBoxes[4].scale -= 1.0f * deltaTime;
-            if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) interactiveBoxes[4].scale += 1.0f * deltaTime;
-            if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
-                for (int i = 0; i < 5; ++i) {
-                    interactiveBoxes[i].position = interactiveBoxes[i].startPos;
-                    interactiveBoxes[i].rotationY = 0.0f;
-                    interactiveBoxes[i].scale = 1.0f;
-                }
-            }
-        }
+        float boxSpeed = 2.5f * deltaTime;
 
-        // ====== MINIJUEGO: agarrar/soltar cajas con E ======
-        if (zoneGames[2].state == ZG_PLAYING) {
-            static bool eLast = false;
-            bool eKey = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
-            if (eKey && !eLast) {
-                ZoneGame& g = zoneGames[2];
-                if (g.extraInt[6] < 0) {
-                    // Agarrar caja libre mas cercana
-                    int best = -1;
-                    float bestDist = 1.8f;
-                    for (int i = 0; i < 3; i++) {
-                        if (g.extraInt[3 + i] != 0) continue;
-                        float d = glm::distance(player.position, interactiveBoxes[i].position);
-                        if (d < bestDist) { bestDist = d; best = i; }
-                    }
-                    if (best >= 0) {
-                        g.extraInt[6] = best;
-                        g.extraInt[3 + best] = 1;
-                        HUD::ShowInstructionColored("Caja agarrada", 1.0f, glm::vec3(0.6f, 1.0f, 0.8f));
-                    } else {
-                        HUD::ShowInstructionColored("Acercate a una caja", 1.0f, glm::vec3(1.0f, 0.7f, 0.3f));
-                    }
-                } else {
-                    // Soltar: verificar bote correcto
-                    int i = g.extraInt[6];
-                    int correctBin = g.extraInt[i];
-                    float dCorr = glm::distance(interactiveBoxes[i].position, binPositions[correctBin]);
-                    if (dCorr < 1.4f) {
-                        g.extraInt[3 + i] = 2;
-                        interactiveBoxes[i].position = binPositions[correctBin];
-                        g.progress++;
-                        HUD::ShowInstructionColored("Categoria correcta!", 1.5f, glm::vec3(0.4f, 1.0f, 0.5f));
-                    } else {
-                        // Verificar si estaba cerca de algun otro bote (incorrecto)
-                        bool botEquivocado = false;
-                        for (int b = 0; b < 3; b++) {
-                            if (b == correctBin) continue;
-                            if (glm::distance(interactiveBoxes[i].position, binPositions[b]) < 1.4f) {
-                                botEquivocado = true; break;
-                            }
-                        }
-                        g.extraInt[3 + i] = 0;
-                        if (botEquivocado) {
-                            interactiveBoxes[i].position = glm::vec3(7.0f + (i * 0.6f), 0.1f, -1.5f + i * 1.2f);
-                            HUD::ShowInstructionColored("Bote incorrecto!", 1.5f, glm::vec3(1.0f, 0.3f, 0.3f));
-                        } else {
-                            HUD::ShowInstructionColored("Caja soltada", 1.0f, glm::vec3(0.8f, 0.8f, 0.8f));
-                        }
-                    }
-                    g.extraInt[6] = -1;
-                }
-            }
-            eLast = eKey;
-        }
-    }
+        // Caja 0: SOLO ROTA EN Y (Teclas O / L)
+        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) interactiveBoxes[0].rotationY -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) interactiveBoxes[0].rotationY += boxSpeed;
 
-    // ZONA 3: ENERGIA - Simon Says
-    if (currentZone == 3 && zoneGames[3].state == ZG_PLAYING && zoneGames[3].extraInt[5] == 1) {
-        static bool k1L=false, k2L=false, k3L=false, k4L=false;
-        bool k1 = glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_KP_1) == GLFW_PRESS;
-        bool k2 = glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_KP_2) == GLFW_PRESS;
-        bool k3 = glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_KP_3) == GLFW_PRESS;
-        bool k4 = glfwGetKey(window, GLFW_KEY_4) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_KP_4) == GLFW_PRESS;
-        int pressed = -1;
-        if (k1 && !k1L) pressed = 0;
-        if (k2 && !k2L) pressed = 1;
-        if (k3 && !k3L) pressed = 2;
-        if (k4 && !k4L) pressed = 3;
-        k1L = k1; k2L = k2; k3L = k3; k4L = k4;
+        // Caja 1: SOLO SE MUEVE EN Y (Teclas U / J)
+        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) interactiveBoxes[1].position.y += boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) interactiveBoxes[1].position.y -= boxSpeed;
+        if (interactiveBoxes[1].position.y < 0.0f) interactiveBoxes[1].position.y = 0.0f;
+        if (interactiveBoxes[1].position.y > 3.0f) interactiveBoxes[1].position.y = 3.0f;
 
-        if (pressed >= 0) {
-            ZoneGame& g = zoneGames[3];
-            int expected = g.extraInt[g.progress];
-            if (pressed == expected) {
-                g.progress++;
-                if (g.progress >= g.target) {
-                    g.extraInt[5] = 3; // victoria
-                    g.rewardTimer = 2.5f;
-                    HUD::ShowInstructionColored("REACTOR ESTABLE!", 3.0f, glm::vec3(0.45f, 1.0f, 0.55f));
-                }
-            } else {
-                g.extraInt[5] = 2; // error
-                g.timer = 1.5f;
-                HUD::ShowInstructionColored("Secuencia incorrecta", 1.5f, glm::vec3(1.0f, 0.3f, 0.3f));
-            }
-        }
-    }
+        // Caja 2: SOLO SE MUEVE EN X (Teclas Y / H)
+        if (glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS) interactiveBoxes[2].position.x -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS) interactiveBoxes[2].position.x += boxSpeed;
 
-    // ZONA 4: CAPSULAS - diagnostico medico (O/T/P)
-    if (currentZone == 4 && zoneGames[4].state == ZG_PLAYING) {
-        static bool oLastCap=false, tLastCap=false, pLastCap=false;
-        bool oKey = glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS;
-        bool tKey = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
-        bool pKey = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
-        int pressed = -1;
-        if (oKey && !oLastCap) pressed = 0;
-        if (tKey && !tLastCap) pressed = 1;
-        if (pKey && !pLastCap) pressed = 2;
-        oLastCap = oKey; tLastCap = tKey; pLastCap = pKey;
+        // Caja 3: SOLO SE MUEVE EN Z (Teclas I / K)
+        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) interactiveBoxes[3].position.z -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) interactiveBoxes[3].position.z += boxSpeed;
 
-        if (pressed >= 0) {
-            ZoneGame& g = zoneGames[4];
-            glm::vec3 capsPos[3] = {
-                glm::vec3(-10.75f, 0.0f, 0.0f),
-                glm::vec3(-7.5f,  0.0f, 0.0f),
-                glm::vec3(-14.0f, 0.0f, 0.0f)
-            };
-            int target = -1;
-            float bestDist = 2.5f;
-            for (int i = 0; i < 3; i++) {
-                if (g.extraInt[3 + i] != 0) continue;
-                float d = glm::distance(glm::vec3(player.position.x, 0.0f, player.position.z), capsPos[i]);
-                if (d < bestDist) { bestDist = d; target = i; }
-            }
-            if (target < 0) {
-                HUD::ShowInstructionColored("Acercate a una capsula", 1.2f, glm::vec3(1.0f, 0.7f, 0.3f));
-            } else if (pressed == g.extraInt[target]) {
-                g.extraInt[3 + target] = 1;
-                g.progress++;
-                HUD::ShowInstructionColored("Diagnostico correcto!", 1.2f, glm::vec3(0.4f, 1.0f, 0.6f));
-            } else {
-                HUD::ShowInstructionColored("Diagnostico incorrecto", 1.2f, glm::vec3(1.0f, 0.3f, 0.3f));
+        // Caja 4: Escala
+        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS)
+            interactiveBoxes[4].scale -= 1.0f * deltaTime;
+        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS)
+            interactiveBoxes[4].scale += 1.0f * deltaTime;
+
+        // Resetear todas las cajas
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+            for (int i = 0; i < 5; ++i) {
+                interactiveBoxes[i].position = interactiveBoxes[i].startPos;
+                interactiveBoxes[i].rotationY = 0.0f;
+                interactiveBoxes[i].scale = 1.0f;
             }
         }
     }
