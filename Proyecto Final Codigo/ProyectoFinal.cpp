@@ -284,6 +284,7 @@ AnimatedModel* PERSONAJE = nullptr;
 Model* CAJA_MODELO = nullptr;
 Model* MOON2 = nullptr;
 Model* BEBEDERO_BASE = nullptr;
+Model* PUERTA_MODELO = nullptr;
 Model* BEBEDERO_AGUA = nullptr;
 
 CubeMap* mainCubeMap = nullptr;
@@ -783,6 +784,7 @@ bool Start() {
     CAJA_MODELO = CargarModelo("models/CAJA_INTERACTIVA.fbx");
     MOON2 = CargarModelo("models/moon2.fbx");
     BEBEDERO_BASE = CargarModelo("models/bebedero.fbx");
+    PUERTA_MODELO = CargarModelo("models/puerta.fbx");
     BEBEDERO_AGUA = CargarModelo("models/bebedero_agua.fbx");
 
     GenerarColisionesDeModelo(HUB_OPACO, 0, baseModelMat);
@@ -1109,6 +1111,46 @@ bool Update() {
     case 0: // HUB
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (HUB_OPACO) HUB_OPACO->Draw(*phongShader);
+
+        // Puertas N/S/E/O del HUB: una puerta visible en cada hitbox de
+        // teletransporte. La que esta mas cerca del jugador "se ilumina"
+        // para indicar que esta a punto de activarse.
+        if (PUERTA_MODELO) {
+            float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
+
+            // 0=S, 1=E, 2=N, 3=O. Yaw para que la cara de la puerta encare
+            // hacia el HUB (jugador) y el modelo quede paralelo a su muro.
+            const float doorYaws[4] = { 180.0f, -90.0f, 0.0f, 90.0f };
+
+            for (int i = 0; i < 4; ++i) {
+                const ZoneDoor& d = zoneDoors[i];
+                if (d.fromZone != 0) continue;
+
+                float dx = player.position.x - d.center.x;
+                float dz = player.position.z - d.center.z;
+                float dist2 = dx * dx + dz * dz;
+                // Brillo cercano: hasta 1.7x cuando el jugador esta encima.
+                // (`near`/`far` son macros de windef.h, no usar como variables)
+                float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
+                float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
+
+                glm::vec4 doorAmb  = glm::vec4(0.25f, 0.20f, 0.08f, 1.0f) * pulse;
+                glm::vec4 doorDiff = glm::vec4(0.95f, 0.78f, 0.30f, 1.0f) * pulse;
+                glm::vec4 doorSpec = glm::vec4(0.60f, 0.55f, 0.30f, 1.0f);
+                SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
+
+                glm::mat4 m(1.0f);
+                m = glm::translate(m, d.center);
+                m = glm::rotate(m, glm::radians(doorYaws[i]), glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                m = glm::scale(m, glm::vec3(0.6f));
+                phongShader->setMat4("model", m);
+                PUERTA_MODELO->Draw(*phongShader);
+            }
+
+            // Restablecer material para no afectar dibujos posteriores
+            SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        }
         break;
 
     case 1: // INVERNADERO
