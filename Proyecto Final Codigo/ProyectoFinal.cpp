@@ -46,6 +46,26 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone);
 void ChangeZone(int z);
 void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase);
 
+// Minijuegos
+void InitInvernaderoGame();
+void UpdateInvernaderoGame(float dt);
+void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view);
+void InvernaderoHit(int lane);
+
+void InitEnergiaGame();
+void UpdateEnergiaGame(float dt);
+void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view);
+void EnergiaPress(int button);
+
+void InitReciclajeGame();
+void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
+
+void InitCapsulasGame();
+void UpdateCapsulasGame(float dt);
+void DrawCapsulasGame(const glm::mat4& projection, const glm::mat4& view);
+void CapsulasCheckNearest();
+// SetCurrentZoneDifficulty se declara despues del enum Difficulty (mas abajo)
+
 // ============ TIPOS ============
 enum CameraMode { CAM_FREE = 0, CAM_FIRST = 1, CAM_SECOND = 2, CAM_THIRD = 3 };
 
@@ -242,8 +262,122 @@ std::vector<AABB> autoColliders[5];
 InteractiveBox interactiveBoxes[5];
 
 bool keyFLast = false;
-bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false;
+bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false, keyF8Last = false;
 bool keyZoneLast[5] = { false, false, false, false, false };
+
+// ============ MINIJUEGOS ============
+enum Difficulty { DIFF_EASY = 0, DIFF_MEDIUM = 1, DIFF_EXPERT = 2 };
+void SetCurrentZoneDifficulty(Difficulty d);
+
+// --- Invernadero (Ritmo / OSU) ---
+struct OsuNote {
+    int lane;        // 0..3
+    float hitTime;   // segundos desde inicio del juego
+    bool hit = false;
+    bool missed = false;
+};
+
+struct InvernaderoGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active = false;
+    bool topDown = false;
+    float gameTime = 0.0f;
+    std::vector<OsuNote> notes;
+    int score = 0;
+    int combo = 0;
+    int maxCombo = 0;
+    int hits = 0;
+    int misses = 0;
+    float waterEffect[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // animacion al regar
+};
+
+// --- Energia (Simon) ---
+struct SimonGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active = false;
+    std::vector<int> pattern;
+    int playerIndex = 0;
+    int phase = 0;       // 0=esperar inicio, 1=mostrar patron, 2=input jugador, 3=fallo
+    float phaseTimer = 0.0f;
+    int showIndex = -1;
+    int level = 1;
+    int score = 0;
+    float buttonGlow[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+};
+
+// --- Reciclaje ---
+enum MaterialType { MAT_METAL = 0, MAT_VIDRIO = 1, MAT_CARTON = 2 };
+struct RecycleItem {
+    glm::vec3 position;
+    MaterialType type;
+    bool sorted = false;
+};
+
+struct ReciclajeGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active = false;
+    std::vector<RecycleItem> items;
+    int selectedItem = -1;     // item bajo selecciÃ³n (uso futuro)
+    int selectedBin = -1;      // bote bajo selecciÃ³n (uso futuro)
+    int score = 0;
+    int selectedBox = 0;       // 0..4 caja interactiva activa para mover en X/Y/Z
+};
+
+// --- Capsulas (Buscar al intruso) ---
+struct CapsulasGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active = false;
+    int totalCapsules = 4;
+    int intruderIdx = 0;
+    float timeLeft = 60.0f;
+    float moveInterval = 0.0f;     // 0 = no se mueve
+    float moveTimer = 0.0f;
+    int   lastChecked = -1;
+    float lastCheckedTimer = 0.0f; // animacion de flash al revisar
+    bool  win = false;
+    bool  lose = false;
+};
+
+InvernaderoGame gInvernadero;
+SimonGame gEnergia;
+ReciclajeGame gReciclaje;
+CapsulasGame gCapsulas;
+
+const glm::vec3 CAPSULA_SLOTS[8] = {
+    glm::vec3( -7.5f, 0.9f, -1.5f),
+    glm::vec3( -7.5f, 0.9f,  1.5f),
+    glm::vec3( -9.5f, 0.9f, -1.5f),
+    glm::vec3( -9.5f, 0.9f,  1.5f),
+    glm::vec3(-11.5f, 0.9f, -1.5f),
+    glm::vec3(-11.5f, 0.9f,  1.5f),
+    glm::vec3(-13.5f, 0.9f, -1.5f),
+    glm::vec3(-13.5f, 0.9f,  1.5f)
+};
+
+const glm::vec3 INV_PLANT_POSITIONS[4] = {
+    glm::vec3(-3.0f, 0.0f, -10.0f),
+    glm::vec3(-1.0f, 0.0f, -10.0f),
+    glm::vec3( 1.0f, 0.0f, -10.0f),
+    glm::vec3( 3.0f, 0.0f, -10.0f)
+};
+
+const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
+    glm::vec3(-3.0f, 1.6f, 11.5f),
+    glm::vec3(-1.0f, 1.6f, 11.5f),
+    glm::vec3( 1.0f, 1.6f, 11.5f),
+    glm::vec3( 3.0f, 1.6f, 11.5f)
+};
+
+const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
+    glm::vec3(11.5f, 0.5f, -2.5f),  // METAL
+    glm::vec3(11.5f, 0.5f,  0.0f),  // VIDRIO
+    glm::vec3(11.5f, 0.5f,  2.5f)   // CARTON
+};
+
+bool keyZLast = false, keyXLast = false, keyCLast = false, keyVLast = false;
+bool keyGLast = false, keyBLast = false, keyELast = false;
+bool keyTabLast = false;
+bool keyDiff5Last = false, keyDiff6Last = false, keyDiff7Last = false;
 
 glm::mat4 baseModelMat(1.0f);
 FractalPlant* miPlantaFractal = nullptr;
@@ -336,22 +470,22 @@ void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
     side = glm::normalize(side);
     glm::vec3 up = glm::normalize(glm::cross(side, forward));
 
-    // Más partículas, más compactas, sin efecto resorte
+    // Mï¿½s partï¿½culas, mï¿½s compactas, sin efecto resorte
     for (int i = 0; i < 70; i++) {
 
         float r = (float)rand() / RAND_MAX;
         float r2 = (float)rand() / RAND_MAX;
 
-        // dispersión orgánica
+        // dispersiï¿½n orgï¿½nica
         float spread = 0.18f + r * 0.75f;
 
         float offsetSide = ((float)rand() / RAND_MAX - 0.5f) * spread;
         float offsetUp = ((float)rand() / RAND_MAX - 0.5f) * spread;
 
-        // ligera elongación horizontal
+        // ligera elongaciï¿½n horizontal
         offsetSide *= 1.35f;
 
-        TrailParticle p;  // <-- FALTABA ESTA LÍNEA
+        TrailParticle p;  // <-- FALTABA ESTA Lï¿½NEA
 
         p.pos = pos + side * offsetSide + up * offsetUp;
 
@@ -469,6 +603,25 @@ void ChangeZone(int z) {
 
     moonTrail.clear();
     trailEmitTimer = 0.0f;
+
+    // Al entrar a una zona con minijuego, inicializarlo automaticamente
+    if (z == 1) {
+        InitInvernaderoGame();
+        gInvernadero.active = true;
+        gInvernadero.topDown = true;
+    }
+    if (z == 2) {
+        InitReciclajeGame();
+        gReciclaje.active = true;
+    }
+    if (z == 3) {
+        InitEnergiaGame();
+        gEnergia.active = true;
+    }
+    if (z == 4) {
+        InitCapsulasGame();
+        gCapsulas.active = true;
+    }
 }
 
 // ============ START ============
@@ -602,6 +755,11 @@ bool Start() {
 
 // ============ CAMARA ============
 glm::mat4 ComputeView() {
+    if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
+        glm::vec3 center(0.0f, 0.0f, -10.0f);
+        glm::vec3 eye(0.0f, 14.0f, -9.99f);
+        return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
+    }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
     glm::vec3 eye, target;
@@ -616,6 +774,9 @@ glm::mat4 ComputeView() {
 }
 
 glm::vec3 ComputeEyePos() {
+    if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
+        return glm::vec3(0.0f, 14.0f, -9.99f);
+    }
     if (cameraMode == CAM_FREE) return camera.Position;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
     if (cameraMode == CAM_FIRST)  return player.position + glm::vec3(0, 1.7f, 0);
@@ -631,10 +792,14 @@ void UpdateCharacter(float dt) {
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
     glm::vec3 movement(0.0f);
 
-    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) { movement += fwd * player.walkSpeed * dt; player.isWalking = true; }
-    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) { movement -= fwd * player.walkSpeed * dt; player.isWalking = true; }
-    if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
-    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+    // El avatar solo se mueve cuando NO estamos en camara libre (para evitar
+    // que WASD controle simultaneamente al jugador y a la camara libre)
+    if (cameraMode != CAM_FREE) {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * player.walkSpeed * dt; player.isWalking = true; }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * player.walkSpeed * dt; player.isWalking = true; }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+    }
 
     glm::vec3 newPos = player.position + movement;
     glm::vec3 testX(newPos.x, 0.0f, player.position.z);
@@ -649,7 +814,8 @@ void UpdateCharacter(float dt) {
 
 void DrawCharacter(const glm::mat4& projection, const glm::mat4& view) {
     if (!PERSONAJE) return;
-    if (cameraMode == CAM_FIRST) return;
+    bool topDown = (currentZone == 1 && gInvernadero.active && gInvernadero.topDown);
+    if (cameraMode == CAM_FIRST && !topDown) return;
 
     dynamicShader->use();
     dynamicShader->setMat4("projection", projection);
@@ -677,6 +843,11 @@ bool Update() {
 
     processInput(window);
     UpdateCharacter(deltaTime);
+
+    // --- Logica de minijuegos ---
+    if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
+    if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
+    if (currentZone == 4 && gCapsulas.active)    UpdateCapsulasGame(deltaTime);
 
     // Resetear luces extras por defecto
     if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
@@ -824,7 +995,7 @@ bool Update() {
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
 
-        // ---- ESTELA DEL COMETA (más visible) ----
+        // ---- ESTELA DEL COMETA (mï¿½s visible) ----
         if (MOON2 && proceduralShader) {
             proceduralShader->use();
             proceduralShader->setMat4("projection", projection);
@@ -846,7 +1017,7 @@ bool Update() {
 
             MOON2->Draw(*proceduralShader);
 
-            // Posición del cometa en el mundo
+            // Posiciï¿½n del cometa en el mundo
             glm::vec3 moonLocalPos(
                 moonRadius * cosf(moonTime),
                 moonRadius * sinf(moonTime),
@@ -932,6 +1103,9 @@ bool Update() {
             BEBEDERO_AGUA->Draw(*wavesShader);
         }
 
+        // ====== MINIJUEGO OSU (Invernadero) ======
+        if (gInvernadero.active) DrawInvernaderoGame(projection, view);
+
         // ====== PLANTA FRACTAL (HELECHO) ======
         if (fractalIteration > 0 && miPlantaFractal) {
             phongShader->use();
@@ -972,6 +1146,9 @@ bool Update() {
                 CAJA_MODELO->Draw(*phongShader);
             }
         }
+
+        // ====== MINIJUEGO RECICLAJE (items + botes) ======
+        if (gReciclaje.active) DrawReciclajeGame(projection, view);
         break;
 
     case 3: // ENERGIA
@@ -979,11 +1156,17 @@ bool Update() {
         if (ENERGIA_OPACO) ENERGIA_OPACO->Draw(*phongShader);
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
         if (ENERGIA_METALICO) ENERGIA_METALICO->Draw(*phongShader);
+
+        // ====== MINIJUEGO SIMON (Energia) ======
+        if (gEnergia.active) DrawEnergiaGame(projection, view);
         break;
 
     case 4: // CAPSULAS
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (CAPSULAS_OPACO) CAPSULAS_OPACO->Draw(*phongShader);
+
+        // ====== MINIJUEGO BUSCAR AL INTRUSO (Capsulas) ======
+        if (gCapsulas.active) DrawCapsulasGame(projection, view);
         break;
     }
 
@@ -999,29 +1182,29 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
 
-    // 1. Controles universales: Cámara Libre
+    // 1. Camara libre: se controla con las FLECHAS (antes WASD).
     if (cameraMode == CAM_FREE) {
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard(FORWARD, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard(BACKWARD, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.ProcessKeyboard(LEFT, deltaTime);
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard(RIGHT, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_UP)    == GLFW_PRESS) camera.ProcessKeyboard(FORWARD,  deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_DOWN)  == GLFW_PRESS) camera.ProcessKeyboard(BACKWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_LEFT)  == GLFW_PRESS) camera.ProcessKeyboard(LEFT,     deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) camera.ProcessKeyboard(RIGHT,    deltaTime);
     }
 
-    // 2. Controles universales: Cambio de Cámaras
+    // 2. Cambio de camaras: F1=1ra, F2=2da, F3=3ra, F8=libre
     bool f1 = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
     bool f2 = glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS;
     bool f3 = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
-    bool f4 = glfwGetKey(window, GLFW_KEY_F4) == GLFW_PRESS;
+    bool f8 = glfwGetKey(window, GLFW_KEY_F8) == GLFW_PRESS;
 
-    if (f1 && !keyF1Last) cameraMode = CAM_FREE;
-    if (f2 && !keyF2Last) cameraMode = CAM_FIRST;
-    if (f3 && !keyF3Last) cameraMode = CAM_SECOND;
-    if (f4 && !keyF4Last) cameraMode = CAM_THIRD;
+    if (f1 && !keyF1Last) cameraMode = CAM_FIRST;
+    if (f2 && !keyF2Last) cameraMode = CAM_SECOND;
+    if (f3 && !keyF3Last) cameraMode = CAM_THIRD;
+    if (f8 && !keyF8Last) cameraMode = CAM_FREE;
 
     keyF1Last = f1;
     keyF2Last = f2;
     keyF3Last = f3;
-    keyF4Last = f4;
+    keyF8Last = f8;
 
     // 3. Controles universales: Teletransporte a Zonas
     int zoneKeys[5] = { GLFW_KEY_0,    GLFW_KEY_1,    GLFW_KEY_2,    GLFW_KEY_3,    GLFW_KEY_4 };
@@ -1035,12 +1218,21 @@ void processInput(GLFWwindow* window) {
         keyZoneLast[i] = now;
     }
 
+    // Dificultad de minijuego de la zona actual: 5=Facil, 6=Medio, 7=Experto
+    bool d5 = glfwGetKey(window, GLFW_KEY_5) == GLFW_PRESS;
+    bool d6 = glfwGetKey(window, GLFW_KEY_6) == GLFW_PRESS;
+    bool d7 = glfwGetKey(window, GLFW_KEY_7) == GLFW_PRESS;
+    if (d5 && !keyDiff5Last) SetCurrentZoneDifficulty(DIFF_EASY);
+    if (d6 && !keyDiff6Last) SetCurrentZoneDifficulty(DIFF_MEDIUM);
+    if (d7 && !keyDiff7Last) SetCurrentZoneDifficulty(DIFF_EXPERT);
+    keyDiff5Last = d5; keyDiff6Last = d6; keyDiff7Last = d7;
+
     // ==========================================
     // CONTROLES ESTRICTOS POR ZONA
     // ==========================================
 
     // ZONA 1: INVERNADERO
-    // Controles del helecho + C/M/Y para el cometa moon2
+    // Minijuego de ritmo (OSU) + controles del helecho y cometa
     if (currentZone == 1) {
         bool pPressed = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
         if (pPressed && !keyPLast) {
@@ -1060,31 +1252,49 @@ void processInput(GLFWwindow* window) {
         }
         keyOLast = oPressed;
 
-        // Colores del cometa SOLO en invernadero
-        static bool cLast = false;
+        // Colores del cometa SOLO en invernadero (N=cyan, M=magenta, Y=yellow;
+        // la tecla C se reserva al minijuego Simon en otra zona)
+        static bool nLast = false;
         static bool mLast = false;
         static bool yLast = false;
-
-        bool cKey = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+        bool nKey = glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS;
         bool mKey = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
         bool yKey = glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS;
-
-        if (cKey && !cLast) {
-            moonTrailMode = 0; // cyan
-            std::cout << "CYAN" << std::endl;
-        }
-        if (mKey && !mLast) {
-            moonTrailMode = 1; // magenta
-            std::cout << "MAGENTA" << std::endl;
-        }
-        if (yKey && !yLast) {
-            moonTrailMode = 2; // yellow
-            std::cout << "YELLOW" << std::endl;
-        }
-
-        cLast = cKey;
+        if (nKey && !nLast) { moonTrailMode = 0; std::cout << "CYAN"    << std::endl; }
+        if (mKey && !mLast) { moonTrailMode = 1; std::cout << "MAGENTA" << std::endl; }
+        if (yKey && !yLast) { moonTrailMode = 2; std::cout << "YELLOW"  << std::endl; }
+        nLast = nKey;
         mLast = mKey;
         yLast = yKey;
+
+        // --- Minijuego OSU ---
+        // B = iniciar/reiniciar partida, V = alternar vista cenital
+        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bKey && !keyBLast) {
+            InitInvernaderoGame();
+            gInvernadero.active = true;
+            gInvernadero.topDown = true;
+            std::cout << "[Invernadero] Nueva partida (dificultad " << gInvernadero.difficulty << ")" << std::endl;
+        }
+        keyBLast = bKey;
+
+        bool gKey = glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS;
+        if (gKey && !keyGLast) {
+            gInvernadero.topDown = !gInvernadero.topDown;
+        }
+        keyGLast = gKey;
+
+        // Carriles: H J K L (cuatro plantas, izquierda a derecha)
+        bool hKey = glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS;
+        bool jKey = glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS;
+        bool kKey = glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS;
+        bool lKey = glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS;
+        static bool hLast=false, jLast=false, kLast=false, lLast=false;
+        if (hKey && !hLast) InvernaderoHit(0);
+        if (jKey && !jLast) InvernaderoHit(1);
+        if (kKey && !kLast) InvernaderoHit(2);
+        if (lKey && !lLast) InvernaderoHit(3);
+        hLast = hKey; jLast = jKey; kLast = kKey; lLast = lKey;
     }
     else {
         keyPLast = false;
@@ -1092,35 +1302,40 @@ void processInput(GLFWwindow* window) {
     }
 
     // ZONA 2: RECICLAJE
-    // Controles directos e individuales de cada caja
+    // - Seleccion de caja activa con TAB (cicla 0..4) o teclas 5..9 directas
+    // - Caja seleccionada se mueve en X/Y/Z con IJKL y UM
+    // - Rotacion con O/L (mientras esten libres no choquen con el OSU de invernadero)
+    // - Reset con R
+    // La logica de separar items (metal/vidrio/carton) se deja COMENTADA y lista.
     if (currentZone == 2) {
         float boxSpeed = 2.5f * deltaTime;
 
-        // Caja 0: SOLO ROTA EN Y (Teclas O / L)
-        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) interactiveBoxes[0].rotationY -= boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) interactiveBoxes[0].rotationY += boxSpeed;
+        bool tabKey = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+        if (tabKey && !keyTabLast) {
+            gReciclaje.selectedBox = (gReciclaje.selectedBox + 1) % 5;
+            std::cout << "[Reciclaje] Caja activa: " << gReciclaje.selectedBox << std::endl;
+        }
+        keyTabLast = tabKey;
 
-        // Caja 1: SOLO SE MUEVE EN Y (Teclas U / J)
-        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) interactiveBoxes[1].position.y += boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) interactiveBoxes[1].position.y -= boxSpeed;
-        if (interactiveBoxes[1].position.y < 0.0f) interactiveBoxes[1].position.y = 0.0f;
-        if (interactiveBoxes[1].position.y > 3.0f) interactiveBoxes[1].position.y = 3.0f;
+        int s = gReciclaje.selectedBox;
+        InteractiveBox& box = interactiveBoxes[s];
 
-        // Caja 2: SOLO SE MUEVE EN X (Teclas Y / H)
-        if (glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS) interactiveBoxes[2].position.x -= boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS) interactiveBoxes[2].position.x += boxSpeed;
+        // Movimiento en los 3 ejes para la caja seleccionada
+        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) box.position.z -= boxSpeed; // adelante
+        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) box.position.z += boxSpeed; // atras
+        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) box.position.x -= boxSpeed; // izquierda
+        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) box.position.x += boxSpeed; // derecha
+        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) box.position.y += boxSpeed; // sube
+        if (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS) box.position.y -= boxSpeed; // baja
+        if (box.position.y < 0.0f) box.position.y = 0.0f;
+        if (box.position.y > 3.0f) box.position.y = 3.0f;
 
-        // Caja 3: SOLO SE MUEVE EN Z (Teclas I / K)
-        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) interactiveBoxes[3].position.z -= boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) interactiveBoxes[3].position.z += boxSpeed;
+        // Rotacion y escala de la caja seleccionada
+        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) box.rotationY -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS) box.rotationY += boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) box.scale -= 1.0f * deltaTime;
+        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) box.scale += 1.0f * deltaTime;
 
-        // Caja 4: Escala
-        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS)
-            interactiveBoxes[4].scale -= 1.0f * deltaTime;
-        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS)
-            interactiveBoxes[4].scale += 1.0f * deltaTime;
-
-        // Resetear todas las cajas
         if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
             for (int i = 0; i < 5; ++i) {
                 interactiveBoxes[i].position = interactiveBoxes[i].startPos;
@@ -1128,6 +1343,72 @@ void processInput(GLFWwindow* window) {
                 interactiveBoxes[i].scale = 1.0f;
             }
         }
+
+        // ---- INTERACCION SEPARAR BASURA (DEJADA LISTA, COMENTADA) ----
+        // Idea: el usuario deberÃ¡ tomar (raycast/clic) cada item y depositarlo en el
+        // bote correspondiente. Por ahora dejamos el esqueleto preparado:
+        //
+        // if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+        //     // 1) Hacer ray-pick contra gReciclaje.items y los botes
+        //     //    - si el item esta cerca del jugador -> gReciclaje.selectedItem = idx;
+        //     //    - si ya hay item seleccionado y se clickea un bote ->
+        //     //      MaterialType bin = gReciclaje.items[selectedItem].type
+        //     //                         == bin  -> score++  (acierto)
+        //     //                         != bin  -> score--  (fallo)
+        //     //      gReciclaje.items[selectedItem].sorted = true;
+        //     //      gReciclaje.selectedItem = -1;
+        // }
+    }
+
+    // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
+    if (currentZone == 3) {
+        // B = iniciar/reiniciar partida
+        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bKey && !keyBLast) {
+            InitEnergiaGame();
+            gEnergia.active = true;
+            std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
+        }
+        keyBLast = bKey;
+
+        // Botones: Z X C V (las 4 baterias)
+        bool zKey = glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS;
+        bool xKey = glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS;
+        bool cKey = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+        bool vKey = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+        if (zKey && !keyZLast) EnergiaPress(0);
+        if (xKey && !keyXLast) EnergiaPress(1);
+        if (cKey && !keyCLast) EnergiaPress(2);
+        if (vKey && !keyVLast) EnergiaPress(3);
+        keyZLast = zKey; keyXLast = xKey; keyCLast = cKey; keyVLast = vKey;
+
+        // ---- INTERACCION CON CLIC DEL MOUSE (LISTA, COMENTADA) ----
+        // Cuando se implemente, habilitar cursor visible al entrar a zona 3 y:
+        // if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+        //     double mx, my; glfwGetCursorPos(window, &mx, &my);
+        //     // Proyectar cada SIMON_BUTTON_POSITIONS[i] al espacio pantalla con
+        //     // projection*view, comparar (mx,my) con la proyeccion y disparar
+        //     // EnergiaPress(i) si la distancia es menor a un radio en pixeles.
+        // }
+    }
+
+    // ZONA 4: CAPSULAS - Buscar al intruso
+    // E = revisar la capsula mas cercana al avatar
+    // B = nueva partida con la dificultad actual
+    if (currentZone == 4) {
+        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bKey && !keyBLast) {
+            InitCapsulasGame();
+            gCapsulas.active = true;
+            std::cout << "[Capsulas] Nueva partida (dificultad " << gCapsulas.difficulty << ")" << std::endl;
+        }
+        keyBLast = bKey;
+
+        bool eKey = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
+        if (eKey && !keyELast) {
+            CapsulasCheckNearest();
+        }
+        keyELast = eKey;
     }
 }
 
@@ -1155,4 +1436,564 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
 }
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     if (cameraMode == CAM_FREE) camera.ProcessMouseScroll((float)yoffset);
+}
+
+// =============================================================================
+// ============         IMPLEMENTACION DE LOS MINIJUEGOS            ============
+// =============================================================================
+
+void SetCurrentZoneDifficulty(Difficulty d) {
+    switch (currentZone) {
+    case 1:
+        gInvernadero.difficulty = d;
+        std::cout << "[Invernadero] Dificultad: " << d << std::endl;
+        InitInvernaderoGame();
+        gInvernadero.active = true;
+        break;
+    case 2:
+        gReciclaje.difficulty = d;
+        std::cout << "[Reciclaje] Dificultad: " << d << std::endl;
+        InitReciclajeGame();
+        gReciclaje.active = true;
+        break;
+    case 3:
+        gEnergia.difficulty = d;
+        std::cout << "[Energia] Dificultad: " << d << std::endl;
+        InitEnergiaGame();
+        gEnergia.active = true;
+        break;
+    case 4:
+        gCapsulas.difficulty = d;
+        std::cout << "[Capsulas] Dificultad: " << d << std::endl;
+        InitCapsulasGame();
+        gCapsulas.active = true;
+        break;
+    default: break;
+    }
+}
+
+// ============ INVERNADERO (OSU) ============
+
+void InitInvernaderoGame() {
+    gInvernadero.notes.clear();
+    gInvernadero.gameTime = 0.0f;
+    gInvernadero.score = 0;
+    gInvernadero.combo = 0;
+    gInvernadero.maxCombo = 0;
+    gInvernadero.hits = 0;
+    gInvernadero.misses = 0;
+    for (int i = 0; i < 4; i++) gInvernadero.waterEffect[i] = 0.0f;
+
+    // Parametros segun dificultad
+    int    totalNotes;
+    float  spacing;          // separacion media entre notas (s)
+    switch (gInvernadero.difficulty) {
+    case DIFF_EASY:   totalNotes = 20; spacing = 1.4f; break;
+    case DIFF_MEDIUM: totalNotes = 30; spacing = 0.9f; break;
+    case DIFF_EXPERT: totalNotes = 45; spacing = 0.55f; break;
+    default:          totalNotes = 20; spacing = 1.4f; break;
+    }
+
+    float t = 2.5f; // primer nota tras 2.5s de margen
+    int lastLane = -1;
+    srand(12345); // patron reproducible
+    for (int i = 0; i < totalNotes; i++) {
+        OsuNote n;
+        int lane;
+        do { lane = rand() % 4; } while (lane == lastLane && (rand() % 3 != 0));
+        n.lane = lane;
+        n.hitTime = t;
+        gInvernadero.notes.push_back(n);
+        lastLane = lane;
+
+        // pequeÃ±as variaciones rÃ­tmicas
+        float jitter = ((rand() % 100) / 100.0f - 0.5f) * spacing * 0.4f;
+        t += spacing + jitter;
+    }
+}
+
+void InvernaderoHit(int lane) {
+    if (!gInvernadero.active) return;
+    // Ventana de acierto por dificultad
+    float window;
+    switch (gInvernadero.difficulty) {
+    case DIFF_EASY:   window = 0.30f; break;
+    case DIFF_MEDIUM: window = 0.20f; break;
+    case DIFF_EXPERT: window = 0.10f; break;
+    default:          window = 0.30f; break;
+    }
+
+    // Buscar la nota mas cercana en ese carril aun no resuelta
+    int bestIdx = -1;
+    float bestDt = 9999.0f;
+    for (size_t i = 0; i < gInvernadero.notes.size(); i++) {
+        OsuNote& n = gInvernadero.notes[i];
+        if (n.lane != lane || n.hit || n.missed) continue;
+        float dt = fabsf(n.hitTime - gInvernadero.gameTime);
+        if (dt < bestDt) { bestDt = dt; bestIdx = (int)i; }
+    }
+
+    gInvernadero.waterEffect[lane] = 1.0f;
+
+    if (bestIdx >= 0 && bestDt <= window) {
+        gInvernadero.notes[bestIdx].hit = true;
+        gInvernadero.hits++;
+        gInvernadero.combo++;
+        if (gInvernadero.combo > gInvernadero.maxCombo) gInvernadero.maxCombo = gInvernadero.combo;
+        int bonus = 100 + gInvernadero.combo * 5;
+        gInvernadero.score += bonus;
+        std::cout << "[OSU] HIT  carril " << lane << "  combo=" << gInvernadero.combo
+                  << "  score=" << gInvernadero.score << std::endl;
+    }
+    else {
+        gInvernadero.combo = 0;
+        gInvernadero.misses++;
+        std::cout << "[OSU] MISS carril " << lane << std::endl;
+    }
+}
+
+void UpdateInvernaderoGame(float dt) {
+    gInvernadero.gameTime += dt;
+    for (int i = 0; i < 4; i++) {
+        gInvernadero.waterEffect[i] -= dt * 2.0f;
+        if (gInvernadero.waterEffect[i] < 0.0f) gInvernadero.waterEffect[i] = 0.0f;
+    }
+    // Marcar como missed cualquier nota cuyo tiempo ya paso fuera de ventana
+    float graceMiss = 0.35f;
+    bool allDone = true;
+    for (auto& n : gInvernadero.notes) {
+        if (!n.hit && !n.missed) {
+            if (gInvernadero.gameTime - n.hitTime > graceMiss) {
+                n.missed = true;
+                gInvernadero.combo = 0;
+                gInvernadero.misses++;
+                std::cout << "[OSU] MISS auto carril " << n.lane << std::endl;
+            }
+            else {
+                allDone = false;
+            }
+        }
+    }
+    if (allDone && !gInvernadero.notes.empty()) {
+        static bool reported = false;
+        if (!reported) {
+            std::cout << "[OSU] FIN. Score=" << gInvernadero.score
+                      << "  Aciertos=" << gInvernadero.hits
+                      << "  Fallos="   << gInvernadero.misses
+                      << "  MaxCombo=" << gInvernadero.maxCombo << std::endl;
+            reported = true;
+        }
+    }
+}
+
+void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!CAJA_MODELO) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    // Colores por carril
+    glm::vec4 laneColors[4] = {
+        glm::vec4(0.9f, 0.2f, 0.2f, 1.0f), // rojo
+        glm::vec4(0.95f,0.7f, 0.1f, 1.0f), // amarillo
+        glm::vec4(0.2f, 0.85f,0.3f, 1.0f), // verde
+        glm::vec4(0.3f, 0.5f, 1.0f, 1.0f)  // azul
+    };
+
+    // 1) Marcadores fijos en cada planta (objetivos)
+    for (int i = 0; i < 4; i++) {
+        glm::vec3 base = INV_PLANT_POSITIONS[i];
+        base.y = 0.05f;
+        float pulse = 0.85f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
+        float waterBoost = gInvernadero.waterEffect[i];
+        glm::vec4 c = laneColors[i] * (pulse + waterBoost);
+        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.4f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, base);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.5f + waterBoost * 0.25f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+
+    // 2) Notas cayendo: visibles 2s antes del hitTime, se acercan al objetivo
+    float lookAhead = 2.0f;
+    for (auto& n : gInvernadero.notes) {
+        if (n.hit || n.missed) continue;
+        float tToHit = n.hitTime - gInvernadero.gameTime;
+        if (tToHit > lookAhead) continue;
+        if (tToHit < -0.4f) continue;
+
+        // En top-down: las notas se desplazan en Z (alejadas -> al objetivo)
+        glm::vec3 target = INV_PLANT_POSITIONS[n.lane];
+        glm::vec3 start  = target + glm::vec3(0.0f, 0.0f, 6.0f); // mas cerca del jugador
+        float a = glm::clamp(1.0f - (tToHit / lookAhead), 0.0f, 1.0f);
+        glm::vec3 pos = glm::mix(start, target, a);
+        pos.y = 0.4f;
+
+        glm::vec4 c = laneColors[n.lane];
+        SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.5f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, pos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.35f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+}
+
+// ============ ENERGIA (Simon) ============
+
+void InitEnergiaGame() {
+    gEnergia.pattern.clear();
+    gEnergia.playerIndex = 0;
+    gEnergia.phase = 1;
+    gEnergia.phaseTimer = 0.0f;
+    gEnergia.showIndex = -1;
+    gEnergia.score = 0;
+    for (int i = 0; i < 4; i++) gEnergia.buttonGlow[i] = 0.0f;
+
+    int startLen;
+    switch (gEnergia.difficulty) {
+    case DIFF_EASY:   startLen = 3; gEnergia.level = 1; break;
+    case DIFF_MEDIUM: startLen = 4; gEnergia.level = 2; break;
+    case DIFF_EXPERT: startLen = 6; gEnergia.level = 4; break;
+    default:          startLen = 3; gEnergia.level = 1; break;
+    }
+    srand((unsigned)(glfwGetTime() * 1000.0));
+    for (int i = 0; i < startLen; i++) gEnergia.pattern.push_back(rand() % 4);
+}
+
+void EnergiaPress(int button) {
+    if (!gEnergia.active) return;
+    if (gEnergia.phase != 2) return; // solo se aceptan inputs en fase de jugador
+    gEnergia.buttonGlow[button] = 1.0f;
+
+    int expected = gEnergia.pattern[gEnergia.playerIndex];
+    if (button == expected) {
+        gEnergia.playerIndex++;
+        gEnergia.score += 50;
+        std::cout << "[Simon] OK boton " << button << "  (" << gEnergia.playerIndex
+                  << "/" << gEnergia.pattern.size() << ")" << std::endl;
+        if (gEnergia.playerIndex >= (int)gEnergia.pattern.size()) {
+            gEnergia.level++;
+            gEnergia.pattern.push_back(rand() % 4);
+            gEnergia.playerIndex = 0;
+            gEnergia.phase = 1;            // volver a mostrar patron
+            gEnergia.phaseTimer = 0.6f;     // pausa antes de mostrar
+            gEnergia.showIndex = -1;
+            std::cout << "[Simon] NIVEL " << gEnergia.level
+                      << "  Score=" << gEnergia.score << std::endl;
+        }
+    }
+    else {
+        std::cout << "[Simon] FALLO. Esperaba " << expected
+                  << " y se presiono " << button
+                  << ".  Score final=" << gEnergia.score << std::endl;
+        gEnergia.phase = 3;
+        gEnergia.phaseTimer = 1.5f;
+    }
+}
+
+void UpdateEnergiaGame(float dt) {
+    for (int i = 0; i < 4; i++) {
+        gEnergia.buttonGlow[i] -= dt * 2.5f;
+        if (gEnergia.buttonGlow[i] < 0.0f) gEnergia.buttonGlow[i] = 0.0f;
+    }
+
+    if (gEnergia.phase == 1) {
+        // Fase de mostrar patron: ilumina uno por uno
+        // velocidad de showing segun dificultad
+        float onTime, offTime;
+        switch (gEnergia.difficulty) {
+        case DIFF_EASY:   onTime = 0.55f; offTime = 0.30f; break;
+        case DIFF_MEDIUM: onTime = 0.40f; offTime = 0.20f; break;
+        case DIFF_EXPERT: onTime = 0.25f; offTime = 0.12f; break;
+        default:          onTime = 0.55f; offTime = 0.30f; break;
+        }
+
+        gEnergia.phaseTimer -= dt;
+        if (gEnergia.phaseTimer <= 0.0f) {
+            gEnergia.showIndex++;
+            if (gEnergia.showIndex >= (int)gEnergia.pattern.size()) {
+                // termino de mostrar -> turno del jugador
+                gEnergia.phase = 2;
+                gEnergia.showIndex = -1;
+                gEnergia.playerIndex = 0;
+                std::cout << "[Simon] Repite el patron (Z X C V)" << std::endl;
+            }
+            else {
+                int idx = gEnergia.pattern[gEnergia.showIndex];
+                gEnergia.buttonGlow[idx] = 1.0f;
+                gEnergia.phaseTimer = onTime + offTime;
+            }
+        }
+    }
+    else if (gEnergia.phase == 3) {
+        gEnergia.phaseTimer -= dt;
+        if (gEnergia.phaseTimer <= 0.0f) {
+            // Reiniciar partida tras fallo
+            InitEnergiaGame();
+        }
+    }
+}
+
+void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!CAJA_MODELO) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    glm::vec4 baseColors[4] = {
+        glm::vec4(1.0f, 0.25f, 0.25f, 1.0f), // rojo
+        glm::vec4(0.25f,1.0f, 0.30f, 1.0f),  // verde
+        glm::vec4(0.30f,0.55f,1.0f, 1.0f),   // azul
+        glm::vec4(1.0f, 0.95f,0.25f, 1.0f)   // amarillo
+    };
+
+    for (int i = 0; i < 4; i++) {
+        float glow = gEnergia.buttonGlow[i];
+        glm::vec4 c = baseColors[i] * (0.35f + glow * 1.4f);
+        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.8f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.55f + glow * 0.10f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+}
+
+// ============ RECICLAJE ============
+
+void InitReciclajeGame() {
+    gReciclaje.items.clear();
+    gReciclaje.score = 0;
+    gReciclaje.selectedItem = -1;
+    gReciclaje.selectedBin = -1;
+
+    int total;
+    switch (gReciclaje.difficulty) {
+    case DIFF_EASY:   total = 6;  break;
+    case DIFF_MEDIUM: total = 9;  break;
+    case DIFF_EXPERT: total = 12; break;
+    default:          total = 6;  break;
+    }
+
+    srand(54321);
+    for (int i = 0; i < total; i++) {
+        RecycleItem it;
+        // Posiciones dispersas en el piso de reciclaje (X 7..10, Z -3..3)
+        float fx = 7.5f + (rand() % 100) / 100.0f * 2.5f;
+        float fz = -3.0f + (rand() % 100) / 100.0f * 6.0f;
+        it.position = glm::vec3(fx, 0.3f, fz);
+        it.type = (MaterialType)(rand() % 3);
+        it.sorted = false;
+        gReciclaje.items.push_back(it);
+    }
+    std::cout << "[Reciclaje] " << total << " items generados" << std::endl;
+}
+
+void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!CAJA_MODELO) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    glm::vec4 matColors[3] = {
+        glm::vec4(0.6f, 0.6f, 0.7f, 1.0f),  // metal: gris azulado
+        glm::vec4(0.3f, 0.8f, 0.85f,1.0f),  // vidrio: turquesa
+        glm::vec4(0.75f,0.55f,0.30f,1.0f)   // carton: ocre
+    };
+
+    // Items en el piso
+    for (auto& it : gReciclaje.items) {
+        if (it.sorted) continue;
+        glm::vec4 c = matColors[(int)it.type];
+        SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.4f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, it.position);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.28f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+
+    // Botes (3): metal, vidrio, carton
+    for (int b = 0; b < 3; b++) {
+        glm::vec4 c = matColors[b] * 1.2f;
+        SetMaterial(phongShader, c * 0.35f, c, glm::vec4(0.5f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, RECYCLE_BIN_POSITIONS[b]);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.8f, 0.8f, 1.4f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+
+    // Marcador visual sobre la caja interactiva seleccionada
+    if (gReciclaje.selectedBox >= 0 && gReciclaje.selectedBox < 5) {
+        glm::vec4 c(1.0f, 1.0f, 0.2f, 1.0f);
+        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.8f), 32);
+        glm::mat4 m(1.0f);
+        glm::vec3 p = interactiveBoxes[gReciclaje.selectedBox].position;
+        p.y += 1.6f * interactiveBoxes[gReciclaje.selectedBox].scale;
+        float pulse = 0.85f + 0.15f * sinf((float)glfwGetTime() * 6.0f);
+        m = glm::translate(m, p);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.18f * pulse));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+}
+
+// ============ CAPSULAS (Buscar al intruso) ============
+
+void InitCapsulasGame() {
+    switch (gCapsulas.difficulty) {
+    case DIFF_EASY:
+        gCapsulas.totalCapsules = 4;
+        gCapsulas.timeLeft = 60.0f;
+        gCapsulas.moveInterval = 0.0f;       // intruso fijo
+        break;
+    case DIFF_MEDIUM:
+        gCapsulas.totalCapsules = 6;
+        gCapsulas.timeLeft = 45.0f;
+        gCapsulas.moveInterval = 20.0f;
+        break;
+    case DIFF_EXPERT:
+        gCapsulas.totalCapsules = 8;
+        gCapsulas.timeLeft = 30.0f;
+        gCapsulas.moveInterval = 10.0f;
+        break;
+    default:
+        gCapsulas.totalCapsules = 4;
+        gCapsulas.timeLeft = 60.0f;
+        gCapsulas.moveInterval = 0.0f;
+        break;
+    }
+    if (gCapsulas.totalCapsules > 8) gCapsulas.totalCapsules = 8;
+    srand((unsigned)(glfwGetTime() * 1000.0) + 7);
+    gCapsulas.intruderIdx = rand() % gCapsulas.totalCapsules;
+    gCapsulas.moveTimer = gCapsulas.moveInterval;
+    gCapsulas.lastChecked = -1;
+    gCapsulas.lastCheckedTimer = 0.0f;
+    gCapsulas.win = false;
+    gCapsulas.lose = false;
+    std::cout << "[Capsulas] " << gCapsulas.totalCapsules << " capsulas, "
+              << gCapsulas.timeLeft << "s, intervalo de movimiento="
+              << gCapsulas.moveInterval << "s" << std::endl;
+}
+
+void CapsulasCheckNearest() {
+    if (!gCapsulas.active) return;
+    if (gCapsulas.win || gCapsulas.lose) return;
+
+    // CÃ¡psula mÃ¡s cercana al avatar dentro de un radio de "asomarse"
+    int best = -1;
+    float bestDist = 2.0f; // metros
+    for (int i = 0; i < gCapsulas.totalCapsules; i++) {
+        glm::vec3 d = CAPSULA_SLOTS[i] - player.position;
+        d.y = 0.0f;
+        float dist = glm::length(d);
+        if (dist < bestDist) { bestDist = dist; best = i; }
+    }
+
+    if (best < 0) {
+        std::cout << "[Capsulas] Acercate mas a una capsula para revisarla." << std::endl;
+        return;
+    }
+
+    gCapsulas.lastChecked = best;
+    gCapsulas.lastCheckedTimer = 0.6f;
+
+    if (best == gCapsulas.intruderIdx) {
+        gCapsulas.win = true;
+        std::cout << "[Capsulas] INTRUSO ATRAPADO en capsula " << best
+                  << "  Tiempo restante=" << gCapsulas.timeLeft << "s" << std::endl;
+    }
+    else {
+        std::cout << "[Capsulas] Capsula " << best << " vacia." << std::endl;
+    }
+}
+
+void UpdateCapsulasGame(float dt) {
+    if (gCapsulas.win || gCapsulas.lose) return;
+
+    gCapsulas.timeLeft -= dt;
+    if (gCapsulas.lastCheckedTimer > 0.0f) gCapsulas.lastCheckedTimer -= dt;
+
+    if (gCapsulas.timeLeft <= 0.0f) {
+        gCapsulas.timeLeft = 0.0f;
+        gCapsulas.lose = true;
+        std::cout << "[Capsulas] TIEMPO AGOTADO. El intruso estaba en capsula "
+                  << gCapsulas.intruderIdx << "." << std::endl;
+        return;
+    }
+
+    if (gCapsulas.moveInterval > 0.0f) {
+        gCapsulas.moveTimer -= dt;
+        if (gCapsulas.moveTimer <= 0.0f) {
+            int prev = gCapsulas.intruderIdx;
+            do {
+                gCapsulas.intruderIdx = rand() % gCapsulas.totalCapsules;
+            } while (gCapsulas.intruderIdx == prev && gCapsulas.totalCapsules > 1);
+            gCapsulas.moveTimer = gCapsulas.moveInterval;
+            std::cout << "[Capsulas] El intruso se movio..." << std::endl;
+        }
+    }
+}
+
+void DrawCapsulasGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!CAJA_MODELO) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    float t = (float)glfwGetTime();
+
+    for (int i = 0; i < gCapsulas.totalCapsules; i++) {
+        // Color base: cyan suave para todas las capsulas (interrogante neutro)
+        glm::vec4 c(0.40f, 0.85f, 1.0f, 1.0f);
+
+        // Si recien la revisamos, flashear verde (acierto) o rojo (vacia)
+        if (gCapsulas.lastChecked == i && gCapsulas.lastCheckedTimer > 0.0f) {
+            float k = glm::clamp(gCapsulas.lastCheckedTimer / 0.6f, 0.0f, 1.0f);
+            if (i == gCapsulas.intruderIdx) {
+                c = glm::mix(c, glm::vec4(0.1f, 1.0f, 0.2f, 1.0f), k);
+            }
+            else {
+                c = glm::mix(c, glm::vec4(1.0f, 0.2f, 0.2f, 1.0f), k);
+            }
+        }
+
+        // Si la partida termino, revelar al intruso parpadeando
+        if ((gCapsulas.win || gCapsulas.lose) && i == gCapsulas.intruderIdx) {
+            float pulse = 0.5f + 0.5f * sinf(t * 6.0f);
+            c = glm::mix(c, glm::vec4(1.0f, 0.7f, 0.1f, 1.0f), pulse);
+        }
+
+        // Resaltar la capsula a la que se esta acercando el avatar
+        glm::vec3 toCaps = CAPSULA_SLOTS[i] - player.position; toCaps.y = 0.0f;
+        bool isNear = glm::length(toCaps) < 2.0f;
+        float nearBoost = isNear ? 0.45f : 0.0f;
+
+        float pulseAll = 0.85f + 0.15f * sinf(t * 2.0f + i);
+        glm::vec4 finalC = c * (pulseAll + nearBoost);
+        SetMaterial(phongShader, finalC * 0.35f, finalC, glm::vec4(0.5f), 32);
+
+        // Cubo flotante de senalizacion encima de la cÃ¡psula
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, CAPSULA_SLOTS[i] + glm::vec3(0.0f, 0.8f + 0.15f*sinf(t*1.5f + i), 0.0f));
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::rotate(m, t * 0.8f + i, glm::vec3(0.0f, 0.0f, 1.0f));
+        m = glm::scale(m, glm::vec3(0.30f + nearBoost * 0.10f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
 }
