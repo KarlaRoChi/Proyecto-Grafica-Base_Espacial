@@ -240,7 +240,9 @@ const unsigned int SCR_HEIGHT = 768;
 
 Camera camera(glm::vec3(0.0f, 2.0f, 10.0f));
 int currentZone = 0;
-CameraMode cameraMode = CAM_FREE;
+// Arrancamos en tercera persona para que WASD mueva al personaje desde el
+// primer frame (CAM_FREE bloqueaba el movimiento del avatar hasta F1/F2/F3).
+CameraMode cameraMode = CAM_THIRD;
 
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
