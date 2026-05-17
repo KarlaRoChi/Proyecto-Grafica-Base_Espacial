@@ -407,12 +407,21 @@ const glm::vec3 CAPSULA_SLOTS[8] = {
     glm::vec3(-13.5f, 0.9f,  1.5f)
 };
 
+// Macetas distribuidas en dos filas (izquierda y derecha del invernadero),
+// con dos macetas cada una a distinto z. Las notas no caen de arriba: viajan
+// HORIZONTALMENTE desde el exterior del muro hacia su maceta:
+//   - lanes 0,1 (fila IZQUIERDA): notas vienen de -x y scrollean a +x
+//   - lanes 2,3 (fila DERECHA):  notas vienen de +x y scrollean a -x
 const glm::vec3 INV_PLANT_POSITIONS[4] = {
-    glm::vec3(-3.0f, 0.0f, -10.0f),
-    glm::vec3(-1.0f, 0.0f, -10.0f),
-    glm::vec3( 1.0f, 0.0f, -10.0f),
-    glm::vec3( 3.0f, 0.0f, -10.0f)
+    glm::vec3(-3.5f, 0.0f,  -8.0f), // 0 = fila izq, atras
+    glm::vec3(-3.5f, 0.0f, -14.0f), // 1 = fila izq, adelante
+    glm::vec3( 3.5f, 0.0f,  -8.0f), // 2 = fila der, atras
+    glm::vec3( 3.5f, 0.0f, -14.0f)  // 3 = fila der, adelante
 };
+// +1 si la nota viaja hacia +x, -1 si hacia -x. Es decir, las notas de la
+// fila izquierda (x negativo) vienen de la pared izquierda y van hacia el
+// centro (+x), y viceversa.
+const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 
 const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
     glm::vec3(-3.0f, 1.6f, 11.5f),
@@ -897,8 +906,9 @@ bool Start() {
 // ============ CAMARA ============
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        glm::vec3 center(0.0f, 0.0f, -10.0f);
-        glm::vec3 eye(0.0f, 14.0f, -9.99f);
+        // Centro ajustado al medio de las dos filas de macetas (z = -11).
+        glm::vec3 center(0.0f, 0.0f, -11.0f);
+        glm::vec3 eye(0.0f, 16.0f, -10.99f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
@@ -1726,9 +1736,9 @@ static std::vector<std::string> BuildHelpLines() {
         }
         break;
     case 1: // INVERNADERO
-        out.push_back("B = iniciar partida de ritmo  |  H J K L = regar maceta");
+        out.push_back("B = iniciar  |  H J = fila izquierda (atras/adelante)  K L = fila derecha");
         if (d <= DIFF_MEDIUM) out.push_back("G alterna vista cenital  |  P/O hace crecer/resetea el helecho");
-        if (d <= DIFF_EASY)   out.push_back("Riega cuando la nota llegue al circulo");
+        if (d <= DIFF_EASY)   out.push_back("Las notas se acercan horizontalmente desde la pared a su maceta");
         break;
     case 2: // RECICLAJE
         out.push_back("O/L rota | U/J Y/H I/K mueven cajas | T/G escala | R reset");
@@ -2268,45 +2278,56 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // Colores por carril
+    // Colores por carril: las dos macetas de la fila IZQ comparten tonos
+    // verdes, las dos de la fila DER comparten tonos azules para que se
+    // distingan visualmente las dos "filas de ritmo".
     glm::vec4 laneColors[4] = {
-        glm::vec4(0.9f, 0.2f, 0.2f, 1.0f), // rojo
-        glm::vec4(0.95f,0.7f, 0.1f, 1.0f), // amarillo
-        glm::vec4(0.2f, 0.85f,0.3f, 1.0f), // verde
-        glm::vec4(0.3f, 0.5f, 1.0f, 1.0f)  // azul
+        glm::vec4(0.55f, 0.95f, 0.40f, 1.0f), // izq atras  verde claro
+        glm::vec4(0.20f, 0.80f, 0.30f, 1.0f), // izq adelante verde oscuro
+        glm::vec4(0.55f, 0.80f, 1.00f, 1.0f), // der atras  celeste
+        glm::vec4(0.20f, 0.55f, 1.00f, 1.0f)  // der adelante azul
     };
 
-    // 1) Marcadores fijos en cada planta (objetivos)
+    // 1) Pequenio marcador plano (disco) sobre cada maceta para indicar
+    //    donde caera la nota. Se respetan las macetas originales del modelo
+    //    INVERNADERO_OPACO; este disco apenas roza el piso (y = 0.02) y
+    //    "florece" cuando recibimos un acierto (waterEffect).
     for (int i = 0; i < 4; i++) {
         glm::vec3 base = INV_PLANT_POSITIONS[i];
-        base.y = 0.05f;
-        float pulse = 0.85f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
+        base.y = 0.02f;
+        float pulse = 0.55f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
         float waterBoost = gInvernadero.waterEffect[i];
-        glm::vec4 c = laneColors[i] * (pulse + waterBoost);
+        glm::vec4 c = laneColors[i] * (pulse + waterBoost * 1.5f);
         SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.4f), 32);
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.5f + waterBoost * 0.25f));
+        // disco delgado, ancho radial pero achatado verticalmente
+        m = glm::scale(m, glm::vec3(0.85f + waterBoost * 0.5f,
+                                    0.85f + waterBoost * 0.5f,
+                                    0.05f));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
 
-    // 2) Notas cayendo: visibles 2s antes del hitTime, se acercan al objetivo
+    // 2) Notas: se acercan horizontalmente desde el muro exterior de su
+    //    fila. Aparecen lookAhead segundos antes y desaparecen 0.4 s
+    //    despues del hitTime (ventana de fallo).
     float lookAhead = 2.0f;
+    float scrollDist = 5.5f; // unidades que recorre la nota antes de llegar
     for (auto& n : gInvernadero.notes) {
         if (n.hit || n.missed) continue;
         float tToHit = n.hitTime - gInvernadero.gameTime;
         if (tToHit > lookAhead) continue;
         if (tToHit < -0.4f) continue;
 
-        // En top-down: las notas se desplazan en Z (alejadas -> al objetivo)
         glm::vec3 target = INV_PLANT_POSITIONS[n.lane];
-        glm::vec3 start  = target + glm::vec3(0.0f, 0.0f, 6.0f); // mas cerca del jugador
+        glm::vec3 start  = target;
+        start.x -= INV_SCROLL_DIR[n.lane] * scrollDist; // viene desde el muro
         float a = glm::clamp(1.0f - (tToHit / lookAhead), 0.0f, 1.0f);
         glm::vec3 pos = glm::mix(start, target, a);
-        pos.y = 0.4f;
+        pos.y = 0.35f;
 
         glm::vec4 c = laneColors[n.lane];
         SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.5f), 32);
@@ -2314,7 +2335,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         glm::mat4 m(1.0f);
         m = glm::translate(m, pos);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.35f));
+        m = glm::scale(m, glm::vec3(0.28f));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
