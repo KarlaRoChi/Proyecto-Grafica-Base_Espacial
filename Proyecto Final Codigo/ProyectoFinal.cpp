@@ -45,6 +45,9 @@ void DrawCharacter(const glm::mat4& projection, const glm::mat4& view);
 bool CheckCollision(glm::vec3 pos, float radius, int zone);
 void ChangeZone(int z);
 void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase);
+void InitDoors();
+void CheckDoorTriggers();
+void RefreshDoorState();
 
 // Minijuegos
 void InitInvernaderoGame();
@@ -98,6 +101,15 @@ struct InteractiveBox {
     float scale = 1.0f;
 };
 
+// Puerta de transito entre zonas. Cuando el jugador entra a la hitbox circular
+// (centro + radius), se le teletransporta a fromZone -> toZone. fromZone == -1
+// indica que la puerta se activa en cualquier zona, distinto de toZone.
+struct ZoneDoor {
+    glm::vec3 center;
+    float     radius;
+    int       fromZone;
+    int       toZone;
+};
 
 struct TrailParticle {
     glm::vec3 pos;
@@ -260,6 +272,13 @@ const float PLAYER_HEIGHT = 1.7f;
 Room rooms[5];
 std::vector<AABB> autoColliders[5];
 InteractiveBox interactiveBoxes[5];
+
+// Puertas: 4 desde el HUB (N/S/E/O) + 4 de retorno desde cada zona al HUB.
+ZoneDoor zoneDoors[8];
+// El jugador puede aparecer ya dentro de una hitbox de puerta tras un teleport.
+// Marcamos por puerta si el jugador estaba dentro el frame anterior y solo
+// disparamos en el flanco de entrada (fuera -> dentro).
+bool doorPlayerInside[8] = { false };
 
 bool keyFLast = false;
 bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false, keyF8Last = false;
@@ -577,6 +596,63 @@ void InitRooms() {
         interactiveBoxes[i].rotationY = 0.0f;
         interactiveBoxes[i].scale = 1.0f;
     }
+
+    InitDoors();
+}
+
+// ============ PUERTAS ENTRE ZONAS ============
+// HUB es zona 0 con bounds (-5,-5)..(5,5). Cada puerta es una hitbox circular
+// pegada al borde correspondiente. Las puertas de retorno se ubican en la
+// frontera de cada zona adyacente al HUB.
+void InitDoors() {
+    // ---- 4 puertas del HUB hacia cada habitacion ----
+    // Sur -> INVERNADERO
+    zoneDoors[0] = { glm::vec3( 0.0f, 0.0f, -4.5f), 0.9f, 0, 1 };
+    // Este -> RECICLAJE
+    zoneDoors[1] = { glm::vec3( 4.5f, 0.0f,  0.0f), 0.9f, 0, 2 };
+    // Norte -> ENERGIA
+    zoneDoors[2] = { glm::vec3( 0.0f, 0.0f,  4.5f), 0.9f, 0, 3 };
+    // Oeste -> CAPSULAS
+    zoneDoors[3] = { glm::vec3(-4.5f, 0.0f,  0.0f), 0.9f, 0, 4 };
+
+    // ---- 4 puertas de retorno al HUB desde cada zona ----
+    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.5f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
+    zoneDoors[5] = { glm::vec3( 6.5f, 0.0f,  0.0f), 0.9f, 2, 0 }; // RECICLAJE -> HUB
+    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  7.0f), 0.9f, 3, 0 }; // ENERGIA -> HUB
+    zoneDoors[7] = { glm::vec3(-7.0f, 0.0f,  0.0f), 0.9f, 4, 0 }; // CAPSULAS -> HUB
+}
+
+static bool PlayerInsideDoor(const ZoneDoor& d) {
+    float dx = player.position.x - d.center.x;
+    float dz = player.position.z - d.center.z;
+    return dx * dx + dz * dz <= d.radius * d.radius;
+}
+
+void CheckDoorTriggers() {
+    for (int i = 0; i < 8; ++i) {
+        const ZoneDoor& d = zoneDoors[i];
+        if (d.fromZone != currentZone) {
+            doorPlayerInside[i] = false;
+            continue;
+        }
+        bool now = PlayerInsideDoor(d);
+        if (now && !doorPlayerInside[i]) {
+            doorPlayerInside[i] = true;
+            ChangeZone(d.toZone);
+            return;
+        }
+        doorPlayerInside[i] = now;
+    }
+}
+
+// Tras un teleport el jugador puede aparecer dentro de una hitbox de puerta
+// (p.ej. una puerta de retorno cerca del spawn de la zona). Marcamos esas
+// puertas como "ya dentro" para que solo se disparen cuando salga y vuelva.
+void RefreshDoorState() {
+    for (int i = 0; i < 8; ++i) {
+        const ZoneDoor& d = zoneDoors[i];
+        doorPlayerInside[i] = (d.fromZone == currentZone) && PlayerInsideDoor(d);
+    }
 }
 
 bool CheckCollision(glm::vec3 pos, float radius, int zone) {
@@ -603,6 +679,11 @@ void ChangeZone(int z) {
 
     moonTrail.clear();
     trailEmitTimer = 0.0f;
+
+    // El spawn de varias zonas cae dentro de la hitbox de su puerta de retorno;
+    // marcamos ese estado para que la puerta solo se dispare cuando el jugador
+    // salga y vuelva a entrar (detección de flanco).
+    RefreshDoorState();
 
     // Al entrar a una zona con minijuego, inicializarlo automaticamente
     if (z == 1) {
@@ -809,6 +890,9 @@ void UpdateCharacter(float dt) {
     if (!CheckCollision(testZ, PLAYER_RADIUS, currentZone)) player.position.z = newPos.z;
 
     player.position.y = 0.0f;
+
+    CheckDoorTriggers();
+
     PERSONAJE->UpdateAnimation(dt);
 }
 
