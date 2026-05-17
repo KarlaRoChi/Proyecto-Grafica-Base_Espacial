@@ -26,6 +26,7 @@
 #include <animatedmodel.h>
 #include <light.h>
 #include <cubemap.h>
+#include <text_renderer.h>
 
 // ============ FORWARD DECLARATIONS ============
 bool Start();
@@ -48,6 +49,15 @@ void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transform
 void InitDoors();
 void CheckDoorTriggers();
 void RefreshDoorState();
+
+// HUD / Menu
+void InitHud();
+void DrawHud();
+void DrawPauseMenu();
+void DrawControlsOverlay();
+void DrawMinimap();
+void DrawQuad2D(float x, float y, float w, float h, glm::vec4 color);
+void DrawTextCentered(const std::string& text, float cx, float y, float scale, glm::vec3 color);
 
 // Minijuegos
 void InitInvernaderoGame();
@@ -76,8 +86,12 @@ struct Player {
     glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f);
     float yaw = 0.0f;
     float walkSpeed = 2.2f;
+    float sprintMult = 1.9f;
     float turnSpeed = 110.0f;
+    float vy = 0.0f;         // velocidad vertical para el salto
     bool  isWalking = false;
+    bool  isSprinting = false;
+    bool  grounded = true;
 };
 
 struct AABB {
@@ -244,6 +258,18 @@ Shader* dynamicShader = nullptr;
 Shader* fresnelShader = nullptr;
 Shader* proceduralShader = nullptr;
 Shader* wavesShader = nullptr;
+Shader* hudShader = nullptr;
+
+// ============ HUD / MENU ============
+TextRenderer* gText = nullptr;
+unsigned int hudVAO = 0, hudVBO = 0;
+glm::mat4 hudProjection = glm::mat4(1.0f);
+
+enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3 };
+MenuState menuState = MENU_NONE;
+int menuSelection = 0;
+bool showMinimap = true;
+bool showControlsHint = true;
 
 // Modelos
 Model* HUB_OPACO = nullptr;
@@ -831,6 +857,8 @@ bool Start() {
     miPlantaFractal = new FractalPlant();
     miPlantaFractal->Generate(0);
 
+    InitHud();
+
     return true;
 }
 
@@ -869,17 +897,37 @@ glm::vec3 ComputeEyePos() {
 // ============ UPDATE PERSONAJE ============
 void UpdateCharacter(float dt) {
     if (!PERSONAJE) return;
+    // Si hay un menu abierto, el avatar no responde al input pero seguimos
+    // dejando que la animacion idle corra para que se vea natural al volver.
+    if (menuState != MENU_NONE) {
+        PERSONAJE->UpdateAnimation(dt);
+        return;
+    }
+
     player.isWalking = false;
+    player.isSprinting = false;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
     glm::vec3 movement(0.0f);
 
     // El avatar solo se mueve cuando NO estamos en camara libre (para evitar
-    // que WASD controle simultaneamente al jugador y a la camara libre)
+    // que WASD controle simultaneamente al jugador y a la camara libre).
     if (cameraMode != CAM_FREE) {
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * player.walkSpeed * dt; player.isWalking = true; }
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * player.walkSpeed * dt; player.isWalking = true; }
+        bool sprint = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS) ||
+                      (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+        float speed = player.walkSpeed * (sprint ? player.sprintMult : 1.0f);
+
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * speed * dt; player.isWalking = true; }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * speed * dt; player.isWalking = true; }
         if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
         if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+
+        player.isSprinting = sprint && player.isWalking;
+
+        // Salto: ESPACIO desde el piso da un impulso vertical
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && player.grounded) {
+            player.vy = 4.5f;
+            player.grounded = false;
+        }
     }
 
     glm::vec3 newPos = player.position + movement;
@@ -889,7 +937,18 @@ void UpdateCharacter(float dt) {
     glm::vec3 testZ(player.position.x, 0.0f, newPos.z);
     if (!CheckCollision(testZ, PLAYER_RADIUS, currentZone)) player.position.z = newPos.z;
 
-    player.position.y = 0.0f;
+    // Integracion vertical para el salto
+    if (!player.grounded) {
+        player.vy -= 12.0f * dt;
+        player.position.y += player.vy * dt;
+        if (player.position.y <= 0.0f) {
+            player.position.y = 0.0f;
+            player.vy = 0.0f;
+            player.grounded = true;
+        }
+    } else {
+        player.position.y = 0.0f;
+    }
 
     CheckDoorTriggers();
 
@@ -928,10 +987,12 @@ bool Update() {
     processInput(window);
     UpdateCharacter(deltaTime);
 
-    // --- Logica de minijuegos ---
-    if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
-    if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
-    if (currentZone == 4 && gCapsulas.active)    UpdateCapsulasGame(deltaTime);
+    // --- Logica de minijuegos --- (pausada cuando el menu esta abierto)
+    if (menuState == MENU_NONE) {
+        if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
+        if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
+        if (currentZone == 4 && gCapsulas.active)    UpdateCapsulasGame(deltaTime);
+    }
 
     // Resetear luces extras por defecto
     if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
@@ -1256,15 +1317,329 @@ bool Update() {
 
     DrawCharacter(projection, view);
 
+    DrawHud();
+
     glfwSwapBuffers(window);
     glfwPollEvents();
     return true;
 }
 
+// ============ HUD / MENU ============
+void InitHud() {
+    hudShader = new Shader("shaders/hud.vs", "shaders/hud.fs");
+    hudProjection = glm::ortho(0.0f, (float)SCR_WIDTH, 0.0f, (float)SCR_HEIGHT);
+
+    glGenVertexArrays(1, &hudVAO);
+    glGenBuffers(1, &hudVBO);
+    glBindVertexArray(hudVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, hudVBO);
+    glBufferData(GL_ARRAY_BUFFER, 6 * 2 * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+
+    gText = new TextRenderer();
+    std::vector<std::string> fontTries = {
+        "fonts/JetBrainsMono-Bold.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/consola.ttf"
+    };
+    gText->Init(fontTries, 32, "shaders/text.vs", "shaders/text.fs",
+                (int)SCR_WIDTH, (int)SCR_HEIGHT);
+}
+
+void DrawQuad2D(float x, float y, float w, float h, glm::vec4 color) {
+    if (!hudShader) return;
+    float verts[12] = {
+        x,     y,
+        x + w, y,
+        x + w, y + h,
+        x,     y,
+        x + w, y + h,
+        x,     y + h
+    };
+    hudShader->use();
+    hudShader->setMat4("projection", hudProjection);
+    hudShader->setVec4("uColor", color);
+    glBindVertexArray(hudVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, hudVBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(verts), verts);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+}
+
+void DrawTextCentered(const std::string& text, float cx, float y, float scale, glm::vec3 color) {
+    if (!gText || !gText->ready) return;
+    float w = gText->MeasureWidth(text, scale);
+    gText->RenderText(text, cx - w * 0.5f, y, scale, color);
+}
+
+static const char* kZoneNames[5] = { "HUB", "INVERNADERO", "RECICLAJE", "ENERGIA", "CAPSULAS" };
+
+void DrawPauseMenu() {
+    // Fondo oscuro semitransparente
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    DrawQuad2D(0.0f, 0.0f, (float)SCR_WIDTH, (float)SCR_HEIGHT, glm::vec4(0.0f, 0.0f, 0.05f, 0.65f));
+
+    // Panel central
+    float panelW = 420.0f, panelH = 380.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (SCR_HEIGHT - panelH) * 0.5f;
+    DrawQuad2D(panelX, panelY, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.92f));
+    // Borde superior tipo Genshin (linea dorada)
+    DrawQuad2D(panelX, panelY + panelH - 4.0f, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+    DrawQuad2D(panelX, panelY, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+
+    float cx = SCR_WIDTH * 0.5f;
+    DrawTextCentered("PAUSA", cx, panelY + panelH - 70.0f, 1.0f, glm::vec3(0.95f, 0.82f, 0.35f));
+    DrawTextCentered(std::string("Zona: ") + kZoneNames[currentZone], cx,
+                     panelY + panelH - 110.0f, 0.55f, glm::vec3(0.85f, 0.88f, 0.95f));
+
+    const char* options[4] = { "Continuar", "Controles", "Mapa", "Salir" };
+    float yBase = panelY + panelH - 170.0f;
+    float lineH = 50.0f;
+    for (int i = 0; i < 4; ++i) {
+        float y = yBase - i * lineH;
+        if (i == menuSelection) {
+            DrawQuad2D(panelX + 30.0f, y - 10.0f, panelW - 60.0f, 38.0f,
+                       glm::vec4(0.92f, 0.78f, 0.35f, 0.28f));
+        }
+        glm::vec3 col = (i == menuSelection)
+            ? glm::vec3(1.0f, 0.95f, 0.55f)
+            : glm::vec3(0.80f, 0.85f, 0.92f);
+        DrawTextCentered(options[i], cx, y, 0.70f, col);
+    }
+    DrawTextCentered("Flechas para navegar, Enter para seleccionar, ESC para volver",
+                     cx, panelY + 22.0f, 0.40f, glm::vec3(0.55f, 0.60f, 0.70f));
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+void DrawControlsOverlay() {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    DrawQuad2D(0.0f, 0.0f, (float)SCR_WIDTH, (float)SCR_HEIGHT, glm::vec4(0.0f, 0.0f, 0.05f, 0.75f));
+
+    float panelW = 620.0f, panelH = 540.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (SCR_HEIGHT - panelH) * 0.5f;
+    DrawQuad2D(panelX, panelY, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.94f));
+    DrawQuad2D(panelX, panelY + panelH - 4.0f, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+    DrawQuad2D(panelX, panelY, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+
+    float cx = SCR_WIDTH * 0.5f;
+    DrawTextCentered("CONTROLES", cx, panelY + panelH - 60.0f, 0.95f, glm::vec3(0.95f, 0.82f, 0.35f));
+
+    // Filas: descripcion + tecla
+    struct Row { const char* label; const char* key; };
+    Row rows[] = {
+        { "Avanzar / Retroceder",     "W / S" },
+        { "Girar izquierda / derecha","A / D" },
+        { "Camara",                   "Mouse" },
+        { "Correr (sprint)",          "Shift" },
+        { "Saltar",                   "Espacio" },
+        { "Interactuar",              "F" },
+        { "Camara 1ra / 2da / 3ra",   "F1 / F2 / F3" },
+        { "Camara libre",             "F8" },
+        { "Menu pausa",               "ESC" },
+        { "Mapa rapido",              "M" },
+        { "Ir a zona (HUB..Capsulas)","0 1 2 3 4" },
+        { "Dificultad zona",          "5 / 6 / 7" }
+    };
+    int n = sizeof(rows) / sizeof(rows[0]);
+
+    float yTop = panelY + panelH - 110.0f;
+    float lineH = 32.0f;
+    float labelX = panelX + 40.0f;
+    float keyX   = panelX + panelW - 240.0f;
+
+    for (int i = 0; i < n; ++i) {
+        float y = yTop - i * lineH;
+        if (i % 2 == 0) {
+            DrawQuad2D(panelX + 20.0f, y - 6.0f, panelW - 40.0f, lineH - 2.0f,
+                       glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
+        }
+        if (gText && gText->ready) {
+            gText->RenderText(rows[i].label, labelX, y, 0.45f, glm::vec3(0.85f, 0.88f, 0.95f));
+            gText->RenderText(rows[i].key,   keyX,   y, 0.45f, glm::vec3(1.0f,  0.95f, 0.55f));
+        }
+    }
+
+    DrawTextCentered("ESC para volver", cx, panelY + 22.0f, 0.40f,
+                     glm::vec3(0.55f, 0.60f, 0.70f));
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Coordenadas del mundo a coordenadas del minimapa. Cada habitacion se
+// pinta como un rect aproximado a sus bounds, y la posicion del jugador
+// se mapea con la misma transformacion para que coincida.
+static void WorldToMap(float wx, float wz, float mapX, float mapY,
+                       float mapW, float mapH, float wMin, float wMax,
+                       float& outX, float& outY) {
+    float u = (wx - wMin) / (wMax - wMin);
+    float v = (wz - wMin) / (wMax - wMin);
+    // En el mundo, +z es "sur" del HUB y -z es "norte". En el mapa
+    // queremos que el norte (-z) este arriba, asi que invertimos v.
+    outX = mapX + u * mapW;
+    outY = mapY + (1.0f - v) * mapH;
+}
+
+void DrawMinimap() {
+    if (!showMinimap) return;
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float size = 200.0f;
+    float pad  = 16.0f;
+    float mapX = (float)SCR_WIDTH - size - pad;
+    float mapY = (float)SCR_HEIGHT - size - pad;
+
+    // Fondo y borde
+    DrawQuad2D(mapX - 3.0f, mapY - 3.0f, size + 6.0f, size + 6.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(mapX, mapY, size, size, glm::vec4(0.05f, 0.10f, 0.18f, 0.85f));
+
+    // Rango del mundo cubierto por el mapa. Cubrimos -16..16 en X y Z para
+    // que entren las 5 zonas comodamente.
+    const float W_MIN = -16.0f, W_MAX = 16.0f;
+
+    // Pintamos cada habitacion como un rect transparente
+    glm::vec4 zoneColors[5] = {
+        glm::vec4(0.85f, 0.85f, 0.85f, 0.55f), // HUB neutro
+        glm::vec4(0.40f, 0.85f, 0.45f, 0.55f), // INVERNADERO verde
+        glm::vec4(0.90f, 0.65f, 0.30f, 0.55f), // RECICLAJE naranja
+        glm::vec4(0.50f, 0.70f, 1.00f, 0.55f), // ENERGIA azul
+        glm::vec4(0.80f, 0.45f, 0.95f, 0.55f)  // CAPSULAS morado
+    };
+    for (int i = 0; i < 5; ++i) {
+        float x1, y1, x2, y2;
+        WorldToMap(rooms[i].boundsMin.x, rooms[i].boundsMin.y, mapX, mapY, size, size,
+                   W_MIN, W_MAX, x1, y1);
+        WorldToMap(rooms[i].boundsMax.x, rooms[i].boundsMax.y, mapX, mapY, size, size,
+                   W_MIN, W_MAX, x2, y2);
+        float rx = (x1 < x2) ? x1 : x2;
+        float ry = (y1 < y2) ? y1 : y2;
+        float rw = std::fabs(x2 - x1);
+        float rh = std::fabs(y2 - y1);
+        glm::vec4 c = zoneColors[i];
+        if (i == currentZone) c.a = 0.95f; // zona actual se ilumina
+        DrawQuad2D(rx, ry, rw, rh, c);
+    }
+
+    // Puerta como pequeño marcador amarillo
+    for (int i = 0; i < 8; ++i) {
+        if (zoneDoors[i].fromZone != currentZone) continue;
+        float dx, dy;
+        WorldToMap(zoneDoors[i].center.x, zoneDoors[i].center.z, mapX, mapY,
+                   size, size, W_MIN, W_MAX, dx, dy);
+        DrawQuad2D(dx - 3.0f, dy - 3.0f, 6.0f, 6.0f,
+                   glm::vec4(1.0f, 0.95f, 0.35f, 1.0f));
+    }
+
+    // Posicion del jugador (punto rojo)
+    float px, py;
+    WorldToMap(player.position.x, player.position.z, mapX, mapY, size, size,
+               W_MIN, W_MAX, px, py);
+    DrawQuad2D(px - 4.0f, py - 4.0f, 8.0f, 8.0f, glm::vec4(1.0f, 0.25f, 0.25f, 1.0f));
+    DrawQuad2D(px - 2.0f, py - 2.0f, 4.0f, 4.0f, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+    if (gText && gText->ready) {
+        gText->RenderText(kZoneNames[currentZone], mapX + 6.0f, mapY + size - 22.0f,
+                          0.40f, glm::vec3(1.0f, 0.95f, 0.55f));
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+void DrawHud() {
+    if (!hudShader) return;
+    // El HUD usa proyeccion ortografica que el callback de resize mantiene
+    // sincronizada con el viewport, por eso aqui solo orquestamos quien
+    // dibuja segun el estado del menu.
+    if (menuState == MENU_CONTROLS) {
+        DrawControlsOverlay();
+        return;
+    }
+    if (menuState == MENU_PAUSE) {
+        DrawPauseMenu();
+        return;
+    }
+
+    // HUD en juego (menu cerrado)
+    DrawMinimap();
+
+    if (showControlsHint && gText && gText->ready) {
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        gText->RenderText("ESC menu  |  M mapa  |  F interactuar  |  Shift correr",
+                          16.0f, 16.0f, 0.40f, glm::vec3(0.80f, 0.85f, 0.92f));
+        glEnable(GL_DEPTH_TEST);
+    }
+}
+
 // ============ INPUT & CONTROLES ============
 void processInput(GLFWwindow* window) {
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
+    // --- ESC abre / cierra el menu (deteccion de flanco) ---
+    static bool keyEscLast = false;
+    bool escNow = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+    if (escNow && !keyEscLast) {
+        if (menuState == MENU_NONE) {
+            menuState = MENU_PAUSE;
+            menuSelection = 0;
+        } else if (menuState == MENU_PAUSE) {
+            menuState = MENU_NONE;
+        } else {
+            menuState = MENU_PAUSE; // desde un sub-menu, vuelve a pausa
+            menuSelection = 0;
+        }
+    }
+    keyEscLast = escNow;
+
+    // --- Si el menu esta abierto, solo navegacion del menu ---
+    if (menuState != MENU_NONE) {
+        static bool kUpLast = false, kDnLast = false, kEnterLast = false;
+        bool up = (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) ||
+                  (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
+        bool dn = (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) ||
+                  (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS);
+        bool enter = (glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS) ||
+                     (glfwGetKey(window, GLFW_KEY_KP_ENTER) == GLFW_PRESS) ||
+                     (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
+
+        if (menuState == MENU_PAUSE) {
+            if (up && !kUpLast) menuSelection = (menuSelection + 3) % 4;
+            if (dn && !kDnLast) menuSelection = (menuSelection + 1) % 4;
+            if (enter && !kEnterLast) {
+                switch (menuSelection) {
+                case 0: menuState = MENU_NONE; break;                   // Continuar
+                case 1: menuState = MENU_CONTROLS; break;               // Controles
+                case 2: showMinimap = !showMinimap;                     // Mapa (toggle)
+                        menuState = MENU_NONE; break;
+                case 3: glfwSetWindowShouldClose(window, true); break;  // Salir
+                }
+            }
+        }
+        kUpLast = up;
+        kDnLast = dn;
+        kEnterLast = enter;
+        return; // congela el resto del input mientras el menu este abierto
+    }
+
+    // --- TAB: alterna el minimapa rapidamente sin pasar por el menu ---
+    static bool keyTabLast = false;
+    bool tabNow = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+    if (tabNow && !keyTabLast) showMinimap = !showMinimap;
+    keyTabLast = tabNow;
 
     // 1. Camara libre: se controla con las FLECHAS (antes WASD).
     if (cameraMode == CAM_FREE) {
@@ -1511,11 +1886,16 @@ void SetLightUniforms(Shader* shader) {
     }
 }
 
-void framebuffer_size_callback(GLFWwindow* window, int width, int height) { glViewport(0, 0, width, height); }
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    glViewport(0, 0, width, height);
+    hudProjection = glm::ortho(0.0f, (float)width, 0.0f, (float)height);
+    if (gText) gText->SetProjection(width, height);
+}
 void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     if (firstMouse) { lastX = (float)xpos; lastY = (float)ypos; firstMouse = false; }
     float xoffset = (float)xpos - lastX; float yoffset = lastY - (float)ypos;
     lastX = (float)xpos; lastY = (float)ypos;
+    if (menuState != MENU_NONE) return;
     if (cameraMode == CAM_FREE) camera.ProcessMouseMovement(xoffset, yoffset);
 }
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
