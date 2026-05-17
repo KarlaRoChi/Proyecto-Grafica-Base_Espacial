@@ -271,7 +271,6 @@ enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3 
 MenuState menuState = MENU_NONE;
 int menuSelection = 0;
 bool showMinimap = true;
-bool showControlsHint = true;
 
 // Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
 std::string gZoneBanner;
@@ -831,6 +830,14 @@ bool Start() {
 
     // === LUCES ===
     gLights.clear();
+
+    // Layout de gLights con slots fijos (cada zona escribe siempre en el
+    // mismo indice y las que no aplican se setean Power=0 cada frame):
+    //   [0]    luz principal de la habitacion (color/intensidad por zona)
+    //   [1]    "linterna" cercana al jugador
+    //   [2]    nucleo del reactor (ENERGIA, intermitente)
+    //   [3,4]  focos extra de CAPSULAS (highlight del intruso)
+    //   [5..8] botones Simon de ENERGIA (rojo, verde, azul, amarillo)
 
     // [0] Luz principal de la habitacion
     Light roomLight;
@@ -2085,11 +2092,14 @@ void processInput(GLFWwindow* window) {
         }
         keyBLast = bKey;
 
-        bool eKey = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
-        if (eKey && !keyELast) {
+        // F (interactuar/recoger) revisa la capsula mas cercana al jugador.
+        // El nombre coincide con la convencion Genshin documentada en el HUD
+        // y en el README.
+        bool fKey = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+        if (fKey && !keyELast) {
             CapsulasCheckNearest();
         }
-        keyELast = eKey;
+        keyELast = fKey;
     }
 }
 
