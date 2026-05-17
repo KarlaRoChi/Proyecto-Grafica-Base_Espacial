@@ -4,6 +4,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>  // shader_m.h usa glm::value_ptr y no lo incluye
 
 #include <map>
 #include <string>

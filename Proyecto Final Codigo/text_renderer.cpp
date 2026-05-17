@@ -1,71 +1,99 @@
 #include <text_renderer.h>
 
-#include <ft2build.h>
-#include FT_FREETYPE_H
+#define STB_TRUETYPE_IMPLEMENTATION
+#include <stb_truetype.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include <cstdio>
+#include <fstream>
 #include <iostream>
+#include <vector>
 
 bool TextRenderer::Init(const std::vector<std::string>& fontPaths, unsigned int pixelHeight,
                         const char* vsPath, const char* fsPath,
                         int screenWidth, int screenHeight) {
     if (ready) return true;
 
-    FT_Library ft;
-    if (FT_Init_FreeType(&ft)) {
-        std::cout << "[TextRenderer] FT_Init_FreeType FAILED" << std::endl;
+    // Cargar el primer .ttf de la lista que se pueda abrir.
+    std::vector<unsigned char> ttfData;
+    std::string usedPath;
+    for (const std::string& p : fontPaths) {
+        std::ifstream file(p, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) continue;
+        std::streamsize size = file.tellg();
+        if (size <= 0) continue;
+        file.seekg(0, std::ios::beg);
+        std::vector<unsigned char> buf((size_t)size);
+        if (file.read((char*)buf.data(), size)) {
+            ttfData = std::move(buf);
+            usedPath = p;
+            break;
+        }
+    }
+    if (ttfData.empty()) {
+        std::cout << "[TextRenderer] No se pudo abrir ninguna fuente .ttf de la lista" << std::endl;
         return false;
     }
 
-    FT_Face face = nullptr;
-    std::string usedPath;
-    for (const std::string& p : fontPaths) {
-        if (!FT_New_Face(ft, p.c_str(), 0, &face)) { usedPath = p; break; }
-        face = nullptr;
-    }
-    if (!face) {
-        std::cout << "[TextRenderer] No se pudo cargar ninguna fuente de la lista" << std::endl;
-        FT_Done_FreeType(ft);
+    stbtt_fontinfo font;
+    int fontOffset = stbtt_GetFontOffsetForIndex(ttfData.data(), 0);
+    if (!stbtt_InitFont(&font, ttfData.data(), fontOffset)) {
+        std::cout << "[TextRenderer] stbtt_InitFont fallo en " << usedPath << std::endl;
         return false;
     }
 
     textShader = new Shader(vsPath, fsPath);
     SetProjection(screenWidth, screenHeight);
 
-    FT_Set_Pixel_Sizes(face, 0, pixelHeight);
+    float fontScale = stbtt_ScaleForPixelHeight(&font, (float)pixelHeight);
 
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
     for (unsigned char c = 32; c < 128; c++) {
-        if (FT_Load_Char(face, c, FT_LOAD_RENDER)) continue;
+        int w = 0, h = 0, xoff = 0, yoff = 0;
+        unsigned char* bitmap = stbtt_GetCodepointBitmap(
+            &font, 0, fontScale, c, &w, &h, &xoff, &yoff);
 
-        unsigned int texture;
+        unsigned int texture = 0;
         glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED,
-                     face->glyph->bitmap.width,
-                     face->glyph->bitmap.rows,
-                     0, GL_RED, GL_UNSIGNED_BYTE,
-                     face->glyph->bitmap.buffer);
-
+        if (bitmap && w > 0 && h > 0) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED,
+                         GL_UNSIGNED_BYTE, bitmap);
+        } else {
+            // Caracteres como ' ' no tienen bitmap; subimos un pixel vacio.
+            unsigned char blank = 0;
+            w = h = 1; xoff = 0; yoff = 0;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, 1, 1, 0, GL_RED,
+                         GL_UNSIGNED_BYTE, &blank);
+        }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
+        int advWidthUnscaled = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&font, c, &advWidthUnscaled, &lsb);
+
         Character ch;
         ch.TextureID = texture;
-        ch.Size      = glm::ivec2(face->glyph->bitmap.width, face->glyph->bitmap.rows);
-        ch.Bearing   = glm::ivec2(face->glyph->bitmap_left, face->glyph->bitmap_top);
-        ch.Advance   = (unsigned int)face->glyph->advance.x;
+        ch.Size      = glm::ivec2(w, h);
+        // FreeType usa bitmap_top positivo (altura sobre baseline). En stbtt
+        // yoff es la y-down del top del glifo, asi que invertimos el signo
+        // para mantener compatibilidad con RenderText.
+        ch.Bearing   = glm::ivec2(xoff, -yoff);
+        // RenderText hace (Advance >> 6) * scale, asumiendo punto fijo 26.6
+        // como devuelve FreeType. Convertimos el avance en pixeles de stbtt
+        // al mismo formato multiplicando por 64.
+        ch.Advance   = (unsigned int)(advWidthUnscaled * fontScale * 64.0f);
         Characters[(char)c] = ch;
+
+        if (bitmap) stbtt_FreeBitmap(bitmap, nullptr);
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
-    FT_Done_Face(face);
-    FT_Done_FreeType(ft);
 
     glGenVertexArrays(1, &VAO);
     glGenBuffers(1, &VBO);
@@ -120,6 +148,9 @@ void TextRenderer::RenderText(const std::string& text, float x, float y,
         float w = ch.Size.x * scale;
         float h = ch.Size.y * scale;
 
+        // stbtt entrega el bitmap top-down; el shader espera UV con (0,0) arriba
+        // y (1,1) abajo igual que con FreeType, asi que mantenemos el mismo
+        // mapeo (la textura ya quedo guardada en ese orden al hacer glTexImage2D).
         float vertices[6][4] = {
             { xpos,     ypos + h, 0.0f, 0.0f },
             { xpos,     ypos,     0.0f, 1.0f },
