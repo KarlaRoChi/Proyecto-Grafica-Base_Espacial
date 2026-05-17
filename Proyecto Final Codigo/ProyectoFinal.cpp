@@ -867,6 +867,25 @@ bool Start() {
     Light capsulaLight2 = capsulaLight1;
     gLights.push_back(capsulaLight2);
 
+    // [5..8] Botones Simon de la zona ENERGIA. Apagadas por defecto; los
+    // colores se actualizan cada frame en Update segun el estado del minijuego.
+    glm::vec3 simonColors[4] = {
+        glm::vec3(1.0f, 0.25f, 0.25f),
+        glm::vec3(0.25f, 1.0f, 0.30f),
+        glm::vec3(0.30f, 0.55f, 1.0f),
+        glm::vec3(1.0f, 0.95f, 0.25f)
+    };
+    for (int i = 0; i < 4; ++i) {
+        Light sb;
+        sb.type = 0;
+        sb.Position = SIMON_BUTTON_POSITIONS[i];
+        sb.Color = glm::vec4(simonColors[i], 1.0f);
+        sb.Power = glm::vec4(0.0f);
+        sb.alphaIndex = 8;
+        sb.distance = 4.0f;
+        gLights.push_back(sb);
+    }
+
     miPlantaFractal = new FractalPlant();
     miPlantaFractal->Generate(0);
 
@@ -1015,6 +1034,11 @@ bool Update() {
     if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
     if (gLights.size() > 3) gLights[3].Power = glm::vec4(0.0f);
     if (gLights.size() > 4) gLights[4].Power = glm::vec4(0.0f);
+    // Botones Simon de ENERGIA (slots 5..8) apagados salvo cuando estemos
+    // dentro de la zona correspondiente y se reactiven mas abajo.
+    for (size_t i = 5; i < gLights.size() && i < 9; ++i) {
+        gLights[i].Power = glm::vec4(0.0f);
+    }
 
     if (gLights.size() > 0) {
         switch (currentZone) {
@@ -1061,6 +1085,18 @@ bool Update() {
                 gLights[2].Color = col;
                 gLights[2].Power = glm::vec4(power);
                 gLights[2].distance = 9.0f;
+            }
+
+            // Botones Simon: brillo proporcional a buttonGlow + halo base
+            // suave para que siempre se vean encendidos cuando estes en la
+            // zona (el minijuego los pulsa cuando suenan en la secuencia o
+            // cuando el jugador los presiona).
+            for (int i = 0; i < 4 && (size_t)(5 + i) < gLights.size(); ++i) {
+                float glow = gEnergia.buttonGlow[i];
+                float ambient = 0.5f + 0.15f * sinf(t * 1.5f + i);
+                float power = ambient + glow * 5.0f;
+                gLights[5 + i].Position = SIMON_BUTTON_POSITIONS[i];
+                gLights[5 + i].Power = glm::vec4(power);
             }
             break;
 
@@ -1699,7 +1735,7 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY) out.push_back("Cada caja tiene un control distinto; experimenta con cada una");
         break;
     case 3: // ENERGIA
-        out.push_back("B = iniciar partida Simon  |  ASDF = botones (en orden del patron)");
+        out.push_back("B = iniciar partida Simon  |  Z X C V = botones (en orden del patron)");
         if (d <= DIFF_EASY) out.push_back("Memoriza la secuencia de colores y repitela");
         break;
     case 4: // CAPSULAS
@@ -2381,30 +2417,13 @@ void UpdateEnergiaGame(float dt) {
 }
 
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CAJA_MODELO) return;
-    phongShader->use();
-    phongShader->setMat4("projection", projection);
-    phongShader->setMat4("view", view);
-
-    glm::vec4 baseColors[4] = {
-        glm::vec4(1.0f, 0.25f, 0.25f, 1.0f), // rojo
-        glm::vec4(0.25f,1.0f, 0.30f, 1.0f),  // verde
-        glm::vec4(0.30f,0.55f,1.0f, 1.0f),   // azul
-        glm::vec4(1.0f, 0.95f,0.25f, 1.0f)   // amarillo
-    };
-
-    for (int i = 0; i < 4; i++) {
-        float glow = gEnergia.buttonGlow[i];
-        glm::vec4 c = baseColors[i] * (0.35f + glow * 1.4f);
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.8f), 32);
-
-        glm::mat4 m(1.0f);
-        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.55f + glow * 0.10f));
-        phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
-    }
+    // Las pilas/botones de la zona ENERGIA son parte del modelo
+    // ENERGIA_OPACO; el "brillo" del minijuego Simon viene de los 4 point
+    // lights configurados en Update (slots 5..8 de gLights). Aqui no hace
+    // falta dibujar geometria extra: los botones existentes del modelo
+    // quedan iluminados con el color del estado actual del juego.
+    (void)projection;
+    (void)view;
 }
 
 // ============ RECICLAJE ============
