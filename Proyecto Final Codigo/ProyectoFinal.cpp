@@ -273,6 +273,11 @@ int menuSelection = 0;
 bool showMinimap = true;
 bool showControlsHint = true;
 
+// Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
+std::string gZoneBanner;
+float gZoneBannerTimer = 0.0f;
+const float ZONE_BANNER_DURATION = 2.5f;
+
 // Modelos
 Model* HUB_OPACO = nullptr;
 Model* INVERNADERO_OPACO = nullptr;
@@ -714,6 +719,10 @@ void ChangeZone(int z) {
     // salga y vuelva a entrar (detección de flanco).
     RefreshDoorState();
 
+    // Banner grande con el nombre de la zona durante ZONE_BANNER_DURATION s
+    gZoneBanner = rooms[z].name;
+    gZoneBannerTimer = ZONE_BANNER_DURATION;
+
     // Al entrar a una zona con minijuego, inicializarlo automaticamente
     if (z == 1) {
         InitInvernaderoGame();
@@ -990,6 +999,10 @@ bool Update() {
 
     processInput(window);
     UpdateCharacter(deltaTime);
+
+    if (menuState == MENU_NONE && gZoneBannerTimer > 0.0f) {
+        gZoneBannerTimer -= deltaTime;
+    }
 
     // --- Logica de minijuegos --- (pausada cuando el menu esta abierto)
     if (menuState == MENU_NONE) {
@@ -1604,6 +1617,132 @@ void DrawMinimap() {
     glEnable(GL_DEPTH_TEST);
 }
 
+// Banner grande con el nombre de la zona al entrar; fade-in 0.3s, sostiene
+// el resto del tiempo y fade-out durante el ultimo medio segundo.
+void DrawZoneBanner() {
+    if (gZoneBannerTimer <= 0.0f || gZoneBanner.empty()) return;
+    if (!gText || !gText->ready) return;
+
+    float t = gZoneBannerTimer;
+    float fade;
+    if (t > ZONE_BANNER_DURATION - 0.3f) {
+        // fade-in al entrar
+        fade = (ZONE_BANNER_DURATION - t) / 0.3f;
+    } else if (t < 0.5f) {
+        // fade-out al final
+        fade = t / 0.5f;
+    } else {
+        fade = 1.0f;
+    }
+    fade = glm::clamp(fade, 0.0f, 1.0f);
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float cx = SCR_WIDTH * 0.5f;
+    float baseY = SCR_HEIGHT * 0.72f;
+    // Sombra detras del texto
+    DrawQuad2D(0.0f, baseY - 24.0f, (float)SCR_WIDTH, 110.0f,
+               glm::vec4(0.0f, 0.0f, 0.08f, 0.45f * fade));
+    // Linea dorada
+    DrawQuad2D(0.0f, baseY - 24.0f, (float)SCR_WIDTH, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, fade));
+    DrawQuad2D(0.0f, baseY + 86.0f, (float)SCR_WIDTH, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, fade));
+
+    DrawTextCentered(gZoneBanner, cx, baseY + 18.0f, 1.6f,
+                     glm::vec3(0.95f, 0.85f, 0.40f) * fade);
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Devuelve la dificultad efectiva para mostrar instrucciones. Las zonas sin
+// minijuego (HUB y reciclaje aun en construccion) heredan EASY para mostrar
+// la guia completa al jugador.
+static Difficulty CurrentHelpDifficulty() {
+    switch (currentZone) {
+    case 1: return gInvernadero.difficulty;
+    case 2: return gReciclaje.difficulty;
+    case 3: return gEnergia.difficulty;
+    case 4: return gCapsulas.difficulty;
+    default: return DIFF_EASY;
+    }
+}
+
+// Texto de ayuda contextual segun zona + dificultad. A menor dificultad mas
+// pistas; en EXPERT solo recordamos las teclas clave del minijuego.
+static std::vector<std::string> BuildHelpLines() {
+    std::vector<std::string> out;
+    Difficulty d = CurrentHelpDifficulty();
+
+    if (d <= DIFF_EASY) {
+        out.push_back("WASD para moverte  |  Shift correr  |  Espacio saltar");
+        out.push_back("ESC abre el menu  |  TAB oculta el mapa");
+        out.push_back("Camina a una puerta dorada para teletransportarte");
+    }
+
+    switch (currentZone) {
+    case 0: // HUB
+        if (d <= DIFF_EASY) {
+            out.push_back("Las 4 puertas (N/S/E/O) llevan a cada zona");
+            out.push_back("Atajos rapidos: 0=HUB 1=Invernadero 2=Reciclaje 3=Energia 4=Capsulas");
+        }
+        break;
+    case 1: // INVERNADERO
+        out.push_back("B = iniciar partida de ritmo  |  H J K L = regar maceta");
+        if (d <= DIFF_MEDIUM) out.push_back("G alterna vista cenital  |  P/O hace crecer/resetea el helecho");
+        if (d <= DIFF_EASY)   out.push_back("Riega cuando la nota llegue al circulo");
+        break;
+    case 2: // RECICLAJE
+        out.push_back("O/L rota | U/J Y/H I/K mueven cajas | T/G escala | R reset");
+        if (d <= DIFF_EASY) out.push_back("Cada caja tiene un control distinto; experimenta con cada una");
+        break;
+    case 3: // ENERGIA
+        out.push_back("B = iniciar partida Simon  |  ASDF = botones (en orden del patron)");
+        if (d <= DIFF_EASY) out.push_back("Memoriza la secuencia de colores y repitela");
+        break;
+    case 4: // CAPSULAS
+        out.push_back("B = nueva ronda  |  F = revisar la capsula mas cercana");
+        if (d <= DIFF_EASY) out.push_back("Busca al intruso antes de que se acabe el tiempo");
+        break;
+    }
+
+    // Recordatorio de dificultad
+    const char* difLabel[3] = { "FACIL", "MEDIO", "EXPERTO" };
+    char buf[96];
+    snprintf(buf, sizeof(buf), "Dificultad: %s  (5/6/7 para cambiar)", difLabel[(int)d]);
+    out.push_back(buf);
+    return out;
+}
+
+void DrawInstructionsPanel() {
+    if (!gText || !gText->ready) return;
+    std::vector<std::string> lines = BuildHelpLines();
+    if (lines.empty()) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float pad = 16.0f;
+    float lineH = 22.0f;
+    float panelH = lines.size() * lineH + 20.0f;
+    float panelW = 500.0f;
+    float x = pad;
+    float y = pad; // esquina inferior izquierda
+
+    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.78f));
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        float lineY = y + panelH - 20.0f - (float)i * lineH;
+        gText->RenderText(lines[i], x + 14.0f, lineY, 0.40f,
+                          glm::vec3(0.85f, 0.88f, 0.95f));
+    }
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawHud() {
     if (!hudShader) return;
     // El HUD usa proyeccion ortografica que el callback de resize mantiene
@@ -1620,15 +1759,8 @@ void DrawHud() {
 
     // HUD en juego (menu cerrado)
     DrawMinimap();
-
-    if (showControlsHint && gText && gText->ready) {
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        gText->RenderText("ESC menu  |  M mapa  |  F interactuar  |  Shift correr",
-                          16.0f, 16.0f, 0.40f, glm::vec3(0.80f, 0.85f, 0.92f));
-        glEnable(GL_DEPTH_TEST);
-    }
+    DrawInstructionsPanel();
+    DrawZoneBanner();
 }
 
 // ============ INPUT & CONTROLES ============
