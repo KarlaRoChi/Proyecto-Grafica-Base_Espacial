@@ -351,6 +351,11 @@ Model* MOON2 = nullptr;
 Model* BEBEDERO_BASE = nullptr;
 Model* PUERTA_MODELO = nullptr;
 Model* BEBEDERO_AGUA = nullptr;
+// Primitivos genericos para los minijuegos: cubo y plano basicos. Si por
+// algun motivo no estan en disco, las rutas que los usan se quedan con
+// CAJA_MODELO para no romper el render (graceful fallback).
+Model* CUBO_MODELO = nullptr;
+Model* PLANO_MODELO = nullptr;
 
 CubeMap* mainCubeMap = nullptr;
 std::vector<Light> gLights;
@@ -1055,6 +1060,8 @@ bool Start() {
     BEBEDERO_BASE = CargarModelo("models/bebedero.fbx");
     PUERTA_MODELO = CargarModelo("models/puerta.fbx");
     BEBEDERO_AGUA = CargarModelo("models/bebedero_agua.fbx");
+    CUBO_MODELO   = CargarModelo("models/cubo.fbx");
+    PLANO_MODELO  = CargarModelo("models/plano.fbx");
 
     GenerarColisionesDeModelo(HUB_OPACO, 0, baseModelMat);
     GenerarColisionesDeModelo(INVERNADERO_OPACO, 1, baseModelMat);
@@ -1532,69 +1539,92 @@ bool Update() {
     glm::vec4 specMetal = glm::vec4(20.0f, 20.0f, 22.0f, 1.0f);
     int alphaMetal = 4096;
 
-    // Helper local para overlay tipo "fresnel rim": redibuja el mismo modelo
-    // con phongShader mezclando con un specular casi blanco que solo se nota
-    // en los bordes (alphaIndex muy alto). Es barato y funciona con el shader
-    // ya existente.
+    // Pase fresnel real con cubemap del skybox para los modelos metalicos.
+    // Se dibuja con blend aditivo encima del pase phong base, asi el color
+    // del FBX sigue debajo y arriba se anade el reflejo del entorno (chrome).
+    // Bias alto + Scale moderado mantiene reflejo incluso al ver el metal
+    // de frente; en angulos rasantes la reflexion llega a 1 (rim brillante).
     auto DrawMetalFresnelOverlay = [&](Model* m, const glm::mat4& modelMat) {
-        if (!m) return;
+        if (!m || !fresnelShader || !mainCubeMap) return;
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        phongShader->use();
-        phongShader->setMat4("model", modelMat);
-        phongShader->setFloat("transparency", 0.45f);
-        SetMaterial(phongShader,
-            glm::vec4(0.0f),
-            glm::vec4(0.10f, 0.12f, 0.15f, 1.0f),
-            glm::vec4(35.0f, 35.0f, 40.0f, 1.0f),
-            8192);
-        m->Draw(*phongShader);
-        phongShader->setFloat("transparency", 1.0f);
+        // El pase phong base ya escribio depth para este modelo; con GL_LESS
+        // por defecto el segundo pase no pasaria el depth test (los z son
+        // iguales). Cambiamos a GL_LEQUAL para que el overlay quede visible.
+        glDepthFunc(GL_LEQUAL);
+        fresnelShader->use();
+        fresnelShader->setMat4("projection", projection);
+        fresnelShader->setMat4("view", view);
+        fresnelShader->setMat4("model", modelMat);
+        fresnelShader->setVec3("cameraPosition", eyePos);
+        fresnelShader->setFloat("_Bias",  0.20f);
+        fresnelShader->setFloat("_Scale", 0.90f);
+        fresnelShader->setFloat("_Power", 3.0f);
+        fresnelShader->setFloat("mRefractionRatio", 0.98f);
+        fresnelShader->setFloat("fresnelAlpha", 0.55f); // intensidad del overlay
+        fresnelShader->setFloat("diffuseMix",  0.0f);    // solo cubemap, no diffuse
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, mainCubeMap->textureID);
+        fresnelShader->setInt("cubetex", 5);
+        glActiveTexture(GL_TEXTURE0);
+        m->Draw(*fresnelShader);
+        glDepthFunc(GL_LESS);
         glDisable(GL_BLEND);
     };
 
+
+    // Dibuja la puerta dorada PUERTA_MODELO en el centro de la hitbox dada,
+    // con un pulso de brillo ambiental + boost cuando el jugador se acerca.
+    // Se usa tanto para las 4 puertas del HUB como para las puertas de
+    // retorno de cada zona habitable (asi todas las zonas tienen un
+    // marcador visible donde se activa el teletransporte).
+    auto DrawZoneDoor = [&](const ZoneDoor& d, float doorYaw) {
+        if (!PUERTA_MODELO) return;
+        float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
+        float dx = player.position.x - d.center.x;
+        float dz = player.position.z - d.center.z;
+        float dist2 = dx * dx + dz * dz;
+        // Brillo cercano: hasta 1.7x cuando el jugador esta encima.
+        // (`near`/`far` son macros de windef.h, no usar como variables)
+        float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
+        float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
+
+        glm::vec4 doorAmb  = glm::vec4(0.25f, 0.20f, 0.08f, 1.0f) * pulse;
+        glm::vec4 doorDiff = glm::vec4(0.95f, 0.78f, 0.30f, 1.0f) * pulse;
+        glm::vec4 doorSpec = glm::vec4(0.60f, 0.55f, 0.30f, 1.0f);
+        phongShader->use();
+        SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, d.center);
+        m = glm::rotate(m, glm::radians(doorYaw), glm::vec3(0.0f, 1.0f, 0.0f));
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.6f));
+        phongShader->setMat4("model", m);
+        PUERTA_MODELO->Draw(*phongShader);
+    };
+
+    // Yaw para cada puerta de retorno (idx 4..7 -> INV, REC, ENE, CAP).
+    // La cara de la puerta encara hacia el HUB (jugador entrante).
+    //   INV (sur del HUB) -> mira al norte: yaw 0
+    //   REC (este)        -> mira al oeste: yaw 90
+    //   ENE (norte)       -> mira al sur:   yaw 180
+    //   CAP (oeste)       -> mira al este:  yaw -90
+    const float RETURN_DOOR_YAW[4] = { 0.0f, 90.0f, 180.0f, -90.0f };
 
     switch (currentZone) {
     case 0: // HUB
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (HUB_OPACO) HUB_OPACO->Draw(*phongShader);
 
-        // Puertas N/S/E/O del HUB: una puerta visible en cada hitbox de
-        // teletransporte. La que esta mas cerca del jugador "se ilumina"
-        // para indicar que esta a punto de activarse.
-        if (PUERTA_MODELO) {
-            float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
-
-            // 0=S, 1=E, 2=N, 3=O. Yaw para que la cara de la puerta encare
-            // hacia el HUB (jugador) y el modelo quede paralelo a su muro.
+        // Puertas N/S/E/O del HUB. Yaw para que la cara mire hacia adentro.
+        // 0=S, 1=E, 2=N, 3=O.
+        {
             const float doorYaws[4] = { 180.0f, -90.0f, 0.0f, 90.0f };
-
             for (int i = 0; i < 4; ++i) {
-                const ZoneDoor& d = zoneDoors[i];
-                if (d.fromZone != 0) continue;
-
-                float dx = player.position.x - d.center.x;
-                float dz = player.position.z - d.center.z;
-                float dist2 = dx * dx + dz * dz;
-                // Brillo cercano: hasta 1.7x cuando el jugador esta encima.
-                // (`near`/`far` son macros de windef.h, no usar como variables)
-                float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
-                float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
-
-                glm::vec4 doorAmb  = glm::vec4(0.25f, 0.20f, 0.08f, 1.0f) * pulse;
-                glm::vec4 doorDiff = glm::vec4(0.95f, 0.78f, 0.30f, 1.0f) * pulse;
-                glm::vec4 doorSpec = glm::vec4(0.60f, 0.55f, 0.30f, 1.0f);
-                SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
-
-                glm::mat4 m(1.0f);
-                m = glm::translate(m, d.center);
-                m = glm::rotate(m, glm::radians(doorYaws[i]), glm::vec3(0.0f, 1.0f, 0.0f));
-                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-                m = glm::scale(m, glm::vec3(0.6f));
-                phongShader->setMat4("model", m);
-                PUERTA_MODELO->Draw(*phongShader);
+                if (zoneDoors[i].fromZone != 0) continue;
+                DrawZoneDoor(zoneDoors[i], doorYaws[i]);
             }
-
             // Restablecer material para no afectar dibujos posteriores
             SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         }
@@ -1613,21 +1643,37 @@ bool Update() {
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (INVERNADERO_OPACO) INVERNADERO_OPACO->Draw(*phongShader);
 
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glDepthMask(GL_FALSE);
-        fresnelShader->use();
-        fresnelShader->setMat4("projection", projection);
-        fresnelShader->setMat4("view", view);
-        fresnelShader->setMat4("model", baseModelMat);
-        fresnelShader->setVec3("cameraPos", eyePos);
-        fresnelShader->setVec3("baseColor", glm::vec3(0.30f, 0.55f, 0.70f));
-        fresnelShader->setFloat("transparency", 0.35f);
-        fresnelShader->setFloat("alphaMult", 0.35f);
-        fresnelShader->setFloat("opacity", 0.35f);
-        if (INVERNADERO_TRASLUCIDO) INVERNADERO_TRASLUCIDO->Draw(*fresnelShader);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
+        // Domo translucido: fresnel real con cubemap del entorno. El alpha
+        // baja a 0.18 para que se vea como vidrio (antes 0.35 daba un look
+        // mas reflejante que transparente). Bias bajo + Scale alto concentra
+        // el reflejo solo en los bordes, dejando el centro casi transparente
+        // (clasico fresnel de vidrio curvado).
+        if (INVERNADERO_TRASLUCIDO && fresnelShader && mainCubeMap) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            fresnelShader->use();
+            fresnelShader->setMat4("projection", projection);
+            fresnelShader->setMat4("view", view);
+            fresnelShader->setMat4("model", baseModelMat);
+            fresnelShader->setVec3("cameraPosition", eyePos);
+            fresnelShader->setFloat("_Bias",  0.05f);
+            fresnelShader->setFloat("_Scale", 1.20f);
+            fresnelShader->setFloat("_Power", 2.5f);
+            fresnelShader->setFloat("mRefractionRatio", 1.02f);
+            fresnelShader->setFloat("fresnelAlpha", 0.18f);
+            fresnelShader->setFloat("diffuseMix",  0.0f);
+            // Cubemap del skybox en la unidad 5: las unidades 0..4 las usa
+            // Mesh::Draw para texture_diffuseN; la 5 queda libre para nuestro
+            // samplerCube. Restauramos la unidad activa al terminar.
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(GL_TEXTURE_CUBE_MAP, mainCubeMap->textureID);
+            fresnelShader->setInt("cubetex", 5);
+            glActiveTexture(GL_TEXTURE0);
+            INVERNADERO_TRASLUCIDO->Draw(*fresnelShader);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
 
         // ---- ESTELA DEL COMETA (m�s visible) ----
         if (MOON2 && proceduralShader) {
@@ -1758,6 +1804,10 @@ bool Update() {
             miPlantaFractal->Draw(*phongShader, plantMat);
             glLineWidth(1.0f);
         }
+
+        // Puerta de retorno al HUB (zoneDoors[4], borde norte del invernadero)
+        DrawZoneDoor(zoneDoors[4], RETURN_DOOR_YAW[0]);
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
     case 2: // RECICLAJE
@@ -1789,6 +1839,10 @@ bool Update() {
 
         // ====== MINIJUEGO RECICLAJE (items + botes) ======
         if (gReciclaje.active) DrawReciclajeGame(projection, view);
+
+        // Puerta de retorno al HUB (zoneDoors[5], borde oeste del modulo)
+        DrawZoneDoor(zoneDoors[5], RETURN_DOOR_YAW[1]);
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
     case 3: // ENERGIA
@@ -1804,6 +1858,10 @@ bool Update() {
 
         // ====== MINIJUEGO SIMON (Energia) ======
         if (gEnergia.active) DrawEnergiaGame(projection, view);
+
+        // Puerta de retorno al HUB (zoneDoors[6], borde sur del modulo)
+        DrawZoneDoor(zoneDoors[6], RETURN_DOOR_YAW[2]);
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
     case 4: // CAPSULAS
@@ -1812,6 +1870,10 @@ bool Update() {
 
         // ====== MINIJUEGO BUSCAR AL INTRUSO (Capsulas) ======
         if (gCapsulas.active) DrawCapsulasGame(projection, view);
+
+        // Puerta de retorno al HUB (zoneDoors[7], borde este del modulo)
+        DrawZoneDoor(zoneDoors[7], RETURN_DOOR_YAW[3]);
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
     }
 
@@ -1980,7 +2042,8 @@ void DrawControlsOverlay() {
         { "Mapa rapido",              "M" },
         { "Ir a zona (HUB..Capsulas)","0 1 2 3 4" },
         { "Dificultad zona",          "5 / 6 / 7" },
-        { "Recorrido: siguiente paso","N" }
+        { "Recorrido: siguiente paso","N" },
+        { "Salir / interrumpir minijuego", "TAB" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
 
@@ -2157,6 +2220,15 @@ static std::vector<std::string> BuildHelpLines() {
                  "RECORRIDO %d/5: %s  (N=siguiente modulo, ESC=pausar)",
                  gRecorridoStep + 1, kZoneNames[RECORRIDO_ORDER[gRecorridoStep]]);
         out.push_back(buf);
+    }
+
+    // Recordatorio prioritario: cuando estas dentro de un minijuego con
+    // camara fija (OSU, Espectro, Simon) la unica forma rapida de soltar
+    // la camara y volver a moverte es TAB. Siempre se muestra arriba del
+    // bloque de pistas para que el jugador no se sienta "atrapado".
+    bool tabExitsMinigame = gInvernadero.active || gEspectro.active || gEnergia.active;
+    if (tabExitsMinigame) {
+        out.push_back("Pulsa TAB para salir del minijuego");
     }
 
     if (d <= DIFF_EASY) {
@@ -2984,10 +3056,14 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     if (lanes < 2) lanes = 2;
     if (lanes > 4) lanes = 4;
 
-    // 1) Pequenio marcador plano (disco) sobre cada maceta ACTIVA para indicar
-    //    donde caera la nota. Se respetan las macetas originales del modelo
-    //    INVERNADERO_OPACO; este disco apenas roza el piso (y = 0.02) y
-    //    "florece" cuando recibimos un acierto (waterEffect).
+    // 1) Marcador plano sobre cada maceta ACTIVA para indicar donde caera la
+    //    nota. Usa PLANO_MODELO (mas natural que un cubo aplanado); si por
+    //    algun motivo no carga, hace fallback a CAJA_MODELO escalado fino.
+    //    Se respetan las macetas originales del modelo INVERNADERO_OPACO;
+    //    el marcador apenas roza el piso (y = 0.02) y "florece" cuando
+    //    recibimos un acierto (waterEffect).
+    Model* floorMarker = PLANO_MODELO ? PLANO_MODELO : CAJA_MODELO;
+    bool floorIsPlano  = (PLANO_MODELO != nullptr);
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = INV_PLANT_POSITIONS[i];
         base.y = 0.02f;
@@ -2998,12 +3074,19 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.85f + waterBoost * 0.5f,
-                                    0.85f + waterBoost * 0.5f,
-                                    0.05f));
+        // Para el plano usamos escala uniforme en XZ (ya esta horizontal en
+        // el FBX). Para el cubo de fallback aplanamos el eje Z.
+        if (floorIsPlano) {
+            float s = 0.85f + waterBoost * 0.5f;
+            m = glm::scale(m, glm::vec3(s, 1.0f, s));
+        } else {
+            m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(0.85f + waterBoost * 0.5f,
+                                        0.85f + waterBoost * 0.5f,
+                                        0.05f));
+        }
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        floorMarker->Draw(*phongShader);
     }
 
     // 1b) Capa de transparencia de color encima de las macetas activas: un
@@ -3204,6 +3287,10 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
     };
 
     float t = (float)glfwGetTime();
+    // Cubos de los botones del Simon: ahora usamos el primitivo CUBO_MODELO
+    // (mas limpio que CAJA_MODELO, que viene tinteada del FBX). Fallback al
+    // anterior si CUBO_MODELO no esta presente para no romper el render.
+    Model* buttonModel = CUBO_MODELO ? CUBO_MODELO : CAJA_MODELO;
     for (int i = 0; i < 4; ++i) {
         float glow = gEnergia.buttonGlow[i];
         float pulse = 0.55f + 0.20f * sinf(t * 2.5f + i);
@@ -3215,7 +3302,7 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.55f + glow * 0.20f));
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        buttonModel->Draw(*phongShader);
     }
 }
 
@@ -3261,7 +3348,9 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
         glm::vec4(0.75f,0.55f,0.30f,1.0f)   // carton: ocre
     };
 
-    // Items en el piso
+    // Items en el piso: cubos de colores por tipo de material. Usamos
+    // CUBO_MODELO porque queremos un cubo geometrico simple (no tinta del FBX).
+    Model* itemModel = CUBO_MODELO ? CUBO_MODELO : CAJA_MODELO;
     for (auto& it : gReciclaje.items) {
         if (it.sorted) continue;
         glm::vec4 c = matColors[(int)it.type];
@@ -3272,7 +3361,7 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.28f));
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        itemModel->Draw(*phongShader);
     }
 
     // Botes (3): metal, vidrio, carton

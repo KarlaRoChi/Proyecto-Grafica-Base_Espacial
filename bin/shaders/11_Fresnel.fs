@@ -24,9 +24,18 @@ in float reflectionCoefficient;
 uniform samplerCube cubetex;
 uniform sampler2D texture_diffuse1;
 
+// Output alpha multiplier. El domo translucido lo deja bajo (0.15 - 0.25)
+// para que se vea como vidrio; los metales lo usan en pase aditivo para
+// inyectar el reflejo del entorno con la intensidad que se quiera.
+uniform float fresnelAlpha;
+
+// Mezcla con la textura diffuse del modelo. 0 = solo fresnel/cubemap (lo
+// que necesita el domo); valores >0 conservan parte del color base del FBX
+// (util para metales con tinte propio).
+uniform float diffuseMix;
+
 void main(void)
 {
-
 	// Fresnel
 	vec4 reflectedColor = textureCube( cubetex, vec3( vReflect.x, vReflect.yz ) );
 	vec4 refractedColor = vec4( 0.0f );
@@ -38,6 +47,6 @@ void main(void)
 	vec4 fresnelColor = reflectionCoefficient * reflectedColor + (1 - reflectionCoefficient) * refractedColor;
 	vec4 texel = texture(texture_diffuse1, TexCoords);
 
-	FragColor = fresnelColor;
-	FragColor.a = 1.0f;
+	FragColor = mix(fresnelColor, texel, clamp(diffuseMix, 0.0, 1.0));
+	FragColor.a = fresnelAlpha;
 }
