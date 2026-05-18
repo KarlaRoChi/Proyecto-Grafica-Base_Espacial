@@ -593,13 +593,29 @@ void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
             + side * ((r - 0.5f) * 0.22f)
             + up * ((r2 - 0.5f) * 0.18f);
 
-        // Variaciones sutiles de color
-        float colorVariation = 0.82f + r * 0.25f;
+        // Variaciones de color amplias: ahora cada particula muta tono,
+        // saturacion y brillo de forma independiente para que la estela se
+        // vea como un arcoiris desordenado en torno al color base elegido.
+        float r3 = (float)rand() / RAND_MAX;
+        float r4 = (float)rand() / RAND_MAX;
+        float r5 = (float)rand() / RAND_MAX;
+
+        // Brillo: amplitud x3 respecto al original (0.45..1.45)
+        float colorVariation = 0.45f + r * 1.0f;
         glm::vec3 variedColor = glm::vec3(baseColor) * colorVariation;
 
-        variedColor.r += (r - 0.5f) * 0.06f;
-        variedColor.g += (r2 - 0.5f) * 0.06f;
-        variedColor.b += (r - 0.5f) * 0.04f;
+        // Mezcla con un color aleatorio brillante para "saltar" del tono base
+        glm::vec3 randomTint(r3, r4, r5);
+        float mixT = 0.30f * r5; // hasta 30% de tinte aleatorio
+        variedColor = glm::mix(variedColor, randomTint, mixT);
+
+        // Jitter por canal mucho mas fuerte (antes 0.06 / 0.04 -> ahora 0.30)
+        variedColor.r += (r  - 0.5f) * 0.30f;
+        variedColor.g += (r2 - 0.5f) * 0.30f;
+        variedColor.b += (r3 - 0.5f) * 0.30f;
+
+        // De vez en cuando inyectar un destello casi blanco
+        if (r4 > 0.92f) variedColor += glm::vec3(0.6f, 0.6f, 0.6f);
 
         variedColor = glm::clamp(variedColor, glm::vec3(0.0f), glm::vec3(1.0f));
         p.color = glm::vec4(variedColor, 1.0f);
