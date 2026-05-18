@@ -65,6 +65,12 @@ void UpdateInvernaderoGame(float dt);
 void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view);
 void InvernaderoHit(int lane);
 
+// Espectrografia del meteorito (segundo minijuego de la zona invernadero)
+void InitEspectroGame();
+void UpdateEspectroGame(float dt);
+void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view);
+void EspectroSetColor(int spectralIdx);
+
 void InitEnergiaGame();
 void UpdateEnergiaGame(float dt);
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view);
@@ -351,17 +357,26 @@ struct OsuNote {
     bool missed = false;
 };
 
+struct WaterDrop {
+    glm::vec3 pos;
+    float vy;
+    float life;
+    int lane;
+};
+
 struct InvernaderoGame {
     Difficulty difficulty = DIFF_EASY;
     bool active = false;
     bool topDown = false;
     float gameTime = 0.0f;
     std::vector<OsuNote> notes;
+    std::vector<WaterDrop> drops;     // gotas que caen sobre la maceta al acertar
     int score = 0;
     int combo = 0;
     int maxCombo = 0;
     int hits = 0;
     int misses = 0;
+    int activeLanes = 4;              // 2 para FACIL, 4 para MEDIO/EXPERTO
     float waterEffect[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // animacion al regar
 };
 
@@ -412,10 +427,47 @@ struct CapsulasGame {
     bool  lose = false;
 };
 
+// --- Espectrografia del meteorito (segundo minijuego del invernadero) ---
+// El meteorito recorre una orbita circular sobre el domo. Cada cierto
+// intervalo aparece una "linea espectral objetivo" (H-alpha, H-beta,
+// H-gamma o Na/Sun) y el jugador debe cambiar el color del meteorito con
+// la tecla correspondiente antes de que se cumpla el beat.
+//   - H-alpha  (656 nm) -> tecla 1 -> rojo
+//   - H-beta   (486 nm) -> tecla 2 -> cyan
+//   - H-gamma  (434 nm) -> tecla 3 -> violeta
+//   - Na (sun) (589 nm) -> tecla 4 -> amarillo
+struct EspectroGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active = false;
+    int currentColor = 0;       // color actual del meteorito (0..3)
+    std::vector<int> pattern;   // lineas objetivo en orden
+    int patternIdx = 0;         // siguiente objetivo
+    float beatInterval = 1.6f;  // tiempo entre beats
+    float beatTimer = 0.0f;     // cuenta regresiva al siguiente check
+    int score = 0;
+    int hits = 0;
+    int misses = 0;
+    int combo = 0;
+    int maxCombo = 0;
+    float lastFeedbackTimer = 0.0f; // glow en pantalla al acertar/fallar
+    bool lastHit = false;
+};
+
 InvernaderoGame gInvernadero;
 SimonGame gEnergia;
 ReciclajeGame gReciclaje;
 CapsulasGame gCapsulas;
+EspectroGame gEspectro;
+
+// Lineas espectrales del minijuego del meteorito. Las definimos aqui para que
+// SpawnMoonTrail (mas abajo) pueda usarlas directamente sin forward-extern.
+const glm::vec4 ESPECTRO_COLORS[4] = {
+    glm::vec4(1.00f, 0.10f, 0.18f, 1.0f), // H-alpha rojo  (656 nm)
+    glm::vec4(0.15f, 0.95f, 1.00f, 1.0f), // H-beta cyan   (486 nm)
+    glm::vec4(0.55f, 0.20f, 1.00f, 1.0f), // H-gamma violeta (434 nm)
+    glm::vec4(1.00f, 0.85f, 0.18f, 1.0f)  // Na/Sun amarillo (589 nm)
+};
+const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "Na/Sun" };
 
 const glm::vec3 CAPSULA_SLOTS[8] = {
     glm::vec3( -7.5f, 0.9f, -1.5f),
@@ -444,11 +496,16 @@ const glm::vec3 INV_PLANT_POSITIONS[4] = {
 // centro (+x), y viceversa.
 const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 
+// La zona ENERGIA tiene 6 pilas (L_1..L_3 y R_1..R_3). El minijuego de
+// luces usa SOLO una pila para concentrar la atencion del jugador: la pila
+// central derecha (R_2) que queda visible de frente al spawn. Los 4 botones
+// del Simon estan distribuidos en una columna sobre la cara frontal de esa
+// pila para que se puedan clickear sin perdersepor el modelo.
 const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
-    glm::vec3(-3.0f, 1.6f, 11.5f),
-    glm::vec3(-1.0f, 1.6f, 11.5f),
-    glm::vec3( 1.0f, 1.6f, 11.5f),
-    glm::vec3( 3.0f, 1.6f, 11.5f)
+    glm::vec3(2.8f, 0.9f, 11.5f),   // boton inferior
+    glm::vec3(2.8f, 1.5f, 11.5f),
+    glm::vec3(2.8f, 2.1f, 11.5f),
+    glm::vec3(2.8f, 2.7f, 11.5f)    // boton superior
 };
 
 const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
@@ -460,7 +517,7 @@ const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
 bool keyZLast = false, keyXLast = false, keyCLast = false, keyVLast = false;
 bool keyGLast = false, keyBLast = false, keyELast = false;
 bool keyTabLast = false;
-bool keyDiff5Last = false, keyDiff6Last = false, keyDiff7Last = false;
+bool keyDiff7Last = false, keyDiff8Last = false, keyDiff9Last = false;
 
 glm::mat4 baseModelMat(1.0f);
 FractalPlant* miPlantaFractal = nullptr;
@@ -555,7 +612,15 @@ glm::vec4 GetMoonTrailBaseColor(int mode) {
 }
 void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
 
-    glm::vec4 baseColor = GetMoonTrailBaseColor(moonTrailMode);
+    // Si el minijuego de espectrografia esta activo, el color base de la
+    // estela usa la linea espectral seleccionada por el jugador en ese
+    // momento. Asi el visual coincide con la mecanica del juego.
+    glm::vec4 baseColor;
+    if (gEspectro.active) {
+        baseColor = ESPECTRO_COLORS[gEspectro.currentColor];
+    } else {
+        baseColor = GetMoonTrailBaseColor(moonTrailMode);
+    }
 
     glm::vec3 forward = glm::normalize(dir);
     if (glm::length(forward) < 0.0001f)
@@ -593,29 +658,46 @@ void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
             + side * ((r - 0.5f) * 0.22f)
             + up * ((r2 - 0.5f) * 0.18f);
 
-        // Variaciones de color amplias: ahora cada particula muta tono,
-        // saturacion y brillo de forma independiente para que la estela se
-        // vea como un arcoiris desordenado en torno al color base elegido.
+        // Variaciones de color EXTRA-amplias: ahora cada particula puede
+        // saltar a cualquier tono del arcoiris, con destellos blancos y
+        // ocasionales tintes "espectrales" tipo H-alpha/H-beta/Na para
+        // recordar la temati ca de espectrografia astronomica del minijuego
+        // del meteorito.
         float r3 = (float)rand() / RAND_MAX;
         float r4 = (float)rand() / RAND_MAX;
         float r5 = (float)rand() / RAND_MAX;
+        float r6 = (float)rand() / RAND_MAX;
 
-        // Brillo: amplitud x3 respecto al original (0.45..1.45)
-        float colorVariation = 0.45f + r * 1.0f;
+        // Brillo: amplitud aun mayor (0.30..1.60)
+        float colorVariation = 0.30f + r * 1.30f;
         glm::vec3 variedColor = glm::vec3(baseColor) * colorVariation;
 
-        // Mezcla con un color aleatorio brillante para "saltar" del tono base
+        // Mezcla con un color aleatorio brillante (hasta 55% de tinte)
         glm::vec3 randomTint(r3, r4, r5);
-        float mixT = 0.30f * r5; // hasta 30% de tinte aleatorio
+        float mixT = 0.55f * r5;
         variedColor = glm::mix(variedColor, randomTint, mixT);
 
-        // Jitter por canal mucho mas fuerte (antes 0.06 / 0.04 -> ahora 0.30)
-        variedColor.r += (r  - 0.5f) * 0.30f;
-        variedColor.g += (r2 - 0.5f) * 0.30f;
-        variedColor.b += (r3 - 0.5f) * 0.30f;
+        // 20% de las particulas reciben un "tinte espectral" especifico:
+        //   H-alpha rojo, H-beta cyan, H-gamma violeta, Na amarillo.
+        if (r6 < 0.20f) {
+            glm::vec3 spectral;
+            int kind = (int)(r6 * 100.0f) % 4;
+            switch (kind) {
+            case 0: spectral = glm::vec3(1.0f, 0.10f, 0.18f); break; // H-alpha
+            case 1: spectral = glm::vec3(0.15f, 0.95f, 1.0f);  break; // H-beta
+            case 2: spectral = glm::vec3(0.55f, 0.20f, 1.0f);  break; // H-gamma
+            default: spectral = glm::vec3(1.0f, 0.85f, 0.18f); break; // Na/sun
+            }
+            variedColor = glm::mix(variedColor, spectral, 0.7f);
+        }
 
-        // De vez en cuando inyectar un destello casi blanco
-        if (r4 > 0.92f) variedColor += glm::vec3(0.6f, 0.6f, 0.6f);
+        // Jitter por canal aun mas fuerte (0.45 vs 0.30 anterior)
+        variedColor.r += (r  - 0.5f) * 0.45f;
+        variedColor.g += (r2 - 0.5f) * 0.45f;
+        variedColor.b += (r3 - 0.5f) * 0.45f;
+
+        // Destellos casi blancos mas frecuentes (10%) + intensos
+        if (r4 > 0.90f) variedColor += glm::vec3(0.75f, 0.75f, 0.75f);
 
         variedColor = glm::clamp(variedColor, glm::vec3(0.0f), glm::vec3(1.0f));
         p.color = glm::vec4(variedColor, 1.0f);
@@ -754,31 +836,11 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone) {
     if (zone < 0 || zone >= 5) return false;
     Room& r = rooms[zone];
 
-    // Bounds de la habitacion
     if (pos.x - radius < r.boundsMin.x) return true;
     if (pos.x + radius > r.boundsMax.x) return true;
     if (pos.z - radius < r.boundsMin.y) return true;
     if (pos.z + radius > r.boundsMax.y) return true;
 
-    // Colisiones AABB vs cilindro del jugador. Solo tomamos en cuenta colliders
-    // cuya altura (max.y) supera el tobillo y cuyo min.y este bajo la cabeza,
-    // para no bloquear con marcadores de techo ni con LEDs del piso.
-    const float playerFootY = pos.y;
-    const float playerHeadY = pos.y + PLAYER_HEIGHT;
-    for (const AABB& a : autoColliders[zone]) {
-        if (a.max.y < playerFootY + 0.15f) continue; // alfombra/piso: ignorar
-        if (a.min.y > playerHeadY) continue;          // cuelga del techo: ignorar
-        // Si el jugador ya esta DENTRO del AABB (en el plano XZ), no lo
-        // consideramos colision: si lo hicieramos, quedaria atrapado al
-        // spawnear y WASD no podria sacarlo de ahi.
-        if (pos.x > a.min.x && pos.x < a.max.x &&
-            pos.z > a.min.z && pos.z < a.max.z) continue;
-        float cx = glm::clamp(pos.x, a.min.x, a.max.x);
-        float cz = glm::clamp(pos.z, a.min.z, a.max.z);
-        float dx = pos.x - cx;
-        float dz = pos.z - cz;
-        if (dx * dx + dz * dz < radius * radius) return true;
-    }
     return false;
 }
 
@@ -805,12 +867,14 @@ void ChangeZone(int z) {
     gZoneBannerTimer = ZONE_BANNER_DURATION;
 
     // Al cambiar de zona apagamos cualquier minijuego pendiente y soltamos la
-    // camara. Los minijuegos solo arrancan al pulsar B en cada sala.
+    // camara. Los minijuegos solo arrancan al pulsar B (o V para espectro)
+    // en cada sala.
     gInvernadero.active = false;
     gInvernadero.topDown = false;
     gReciclaje.active = false;
     gEnergia.active = false;
     gCapsulas.active = false;
+    gEspectro.active = false;
     gMinigameCamLocked = false;
 
     // Narrativa contextual por zona (estilo recorrido guiado).
@@ -1007,10 +1071,19 @@ glm::mat4 ComputeView() {
         glm::vec3 eye(0.0f, 16.0f, -10.99f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
+    if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
+        // Camara persigue el meteorito desde una posicion fija dentro del
+        // invernadero (un poco arriba y atras del cometa) -> la trayectoria
+        // hace que la camara nunca este estable, parte del reto del jugador.
+        float t = (float)glfwGetTime();
+        glm::vec3 meteor = EspectroMeteorPos(t);
+        glm::vec3 anchor(0.0f, 5.5f, -7.0f); // posicion del observador
+        return glm::lookAt(anchor, meteor, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        // Vista fija frente al panel del reactor (centro entre los 4 botones)
-        glm::vec3 center(0.0f, 1.7f, 11.5f);
-        glm::vec3 eye  (0.0f, 2.4f,  8.0f);
+        // Vista fija frente a la pila R_2 (centro entre los 4 botones de esa pila)
+        glm::vec3 center(2.8f, 1.8f, 11.5f);
+        glm::vec3 eye  (2.8f, 2.0f,  8.5f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
@@ -1047,6 +1120,17 @@ glm::mat4 ComputeView() {
     }
     default: return camera.GetViewMatrix();
     }
+    // Clamp del eye a los bounds de la habitacion para que la camara nunca
+    // salga del modulo (atravesando paredes/techo). Dejamos un pequenio
+    // margen para que la lente no quede pegada a la pared.
+    if (currentZone >= 0 && currentZone < 5) {
+        const Room& r = rooms[currentZone];
+        const float margin = 0.4f;
+        eye.x = glm::clamp(eye.x, r.boundsMin.x + margin, r.boundsMax.x - margin);
+        eye.z = glm::clamp(eye.z, r.boundsMin.y + margin, r.boundsMax.y - margin);
+        // techo aproximado en 6 m, suelo en 0.4 m
+        eye.y = glm::clamp(eye.y, 0.6f, 5.5f);
+    }
     return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
@@ -1054,15 +1138,27 @@ glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
         return glm::vec3(0.0f, 14.0f, -9.99f);
     }
+    if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
+        return glm::vec3(0.0f, 5.5f, -7.0f);
+    }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        return glm::vec3(0.0f, 2.4f, 8.0f);
+        return glm::vec3(2.8f, 2.0f, 8.5f);
     }
     if (cameraMode == CAM_FREE) return camera.Position;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
-    if (cameraMode == CAM_FIRST)  return player.position + glm::vec3(0.0f, 1.7f, 0.0f);
-    if (cameraMode == CAM_THIRD)  return player.position - fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
-    if (cameraMode == CAM_SECOND) return player.position + fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
-    return camera.Position;
+    glm::vec3 eye;
+    if      (cameraMode == CAM_FIRST)  eye = player.position + glm::vec3(0.0f, 1.7f, 0.0f);
+    else if (cameraMode == CAM_THIRD)  eye = player.position - fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
+    else if (cameraMode == CAM_SECOND) eye = player.position + fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
+    else return camera.Position;
+    if (currentZone >= 0 && currentZone < 5) {
+        const Room& r = rooms[currentZone];
+        const float margin = 0.4f;
+        eye.x = glm::clamp(eye.x, r.boundsMin.x + margin, r.boundsMax.x - margin);
+        eye.z = glm::clamp(eye.z, r.boundsMin.y + margin, r.boundsMax.y - margin);
+        eye.y = glm::clamp(eye.y, 0.6f, 5.5f);
+    }
+    return eye;
 }
 
 // ============ UPDATE PERSONAJE ============
@@ -1198,6 +1294,7 @@ bool Update() {
     // --- Logica de minijuegos --- (pausada cuando el menu esta abierto)
     if (menuState == MENU_NONE) {
         if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
+        if (currentZone == 1 && gEspectro.active)    UpdateEspectroGame(deltaTime);
         if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
         if (currentZone == 4 && gCapsulas.active)    UpdateCapsulasGame(deltaTime);
     }
@@ -1538,6 +1635,7 @@ bool Update() {
 
         // ====== MINIJUEGO OSU (Invernadero) ======
         if (gInvernadero.active) DrawInvernaderoGame(projection, view);
+        if (gEspectro.active)    DrawEspectroGame(projection, view);
 
         // ====== PLANTA FRACTAL (HELECHO) ======
         if (fractalIteration > 0 && miPlantaFractal) {
@@ -1933,9 +2031,10 @@ static std::vector<std::string> BuildHelpLines() {
         }
         break;
     case 1: // INVERNADERO
-        out.push_back("B = iniciar  |  H J = fila izquierda (atras/adelante)  K L = fila derecha");
+        out.push_back("B = ritmo macetas (H J K L)  |  V = espectrografia meteoro (1 2 3 4)");
         if (d <= DIFF_MEDIUM) out.push_back("G alterna vista cenital  |  P/O hace crecer/resetea el helecho");
-        if (d <= DIFF_EASY)   out.push_back("Las notas se acercan horizontalmente desde la pared a su maceta");
+        if (d <= DIFF_EASY)   out.push_back("Espectro: 1 H-a (rojo)  2 H-b (cyan)  3 H-g (violeta)  4 Na (amarillo)");
+        if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
         break;
     case 2: // RECICLAJE
         out.push_back("O/L rota | U/J Y/H I/K mueven cajas | T/G escala | R reset");
@@ -1954,7 +2053,7 @@ static std::vector<std::string> BuildHelpLines() {
     // Recordatorio de dificultad
     const char* difLabel[3] = { "FACIL", "MEDIO", "EXPERTO" };
     char buf[96];
-    snprintf(buf, sizeof(buf), "Dificultad: %s  (5/6/7 para cambiar)", difLabel[(int)d]);
+    snprintf(buf, sizeof(buf), "Dificultad: %s  (7/8/9 para cambiar)", difLabel[(int)d]);
     out.push_back(buf);
     return out;
 }
@@ -2162,7 +2261,9 @@ void processInput(GLFWwindow* window) {
     keyF3Last = f3;
     keyF8Last = f8;
 
-    // 3. Controles universales: Teletransporte a Zonas
+    // 3. Controles universales: Teletransporte a Zonas. Durante el minijuego
+    // de espectrografia las teclas 1..4 sirven como teclas de color, asi que
+    // dejamos solo el 0 (regreso al HUB) habilitado.
     int zoneKeys[5] = { GLFW_KEY_0,    GLFW_KEY_1,    GLFW_KEY_2,    GLFW_KEY_3,    GLFW_KEY_4 };
     int zoneKeysKP[5] = { GLFW_KEY_KP_0, GLFW_KEY_KP_1, GLFW_KEY_KP_2, GLFW_KEY_KP_3, GLFW_KEY_KP_4 };
 
@@ -2170,18 +2271,19 @@ void processInput(GLFWwindow* window) {
         bool now = (glfwGetKey(window, zoneKeys[i]) == GLFW_PRESS) ||
             (glfwGetKey(window, zoneKeysKP[i]) == GLFW_PRESS);
 
-        if (now && !keyZoneLast[i]) ChangeZone(i);
+        bool allowZone = !(gEspectro.active && i >= 1 && i <= 4);
+        if (now && !keyZoneLast[i] && allowZone) ChangeZone(i);
         keyZoneLast[i] = now;
     }
 
-    // Dificultad de minijuego de la zona actual: 5=Facil, 6=Medio, 7=Experto
-    bool d5 = glfwGetKey(window, GLFW_KEY_5) == GLFW_PRESS;
-    bool d6 = glfwGetKey(window, GLFW_KEY_6) == GLFW_PRESS;
+    // Dificultad de minijuego de la zona actual: 7=Facil, 8=Medio, 9=Experto
     bool d7 = glfwGetKey(window, GLFW_KEY_7) == GLFW_PRESS;
-    if (d5 && !keyDiff5Last) SetCurrentZoneDifficulty(DIFF_EASY);
-    if (d6 && !keyDiff6Last) SetCurrentZoneDifficulty(DIFF_MEDIUM);
-    if (d7 && !keyDiff7Last) SetCurrentZoneDifficulty(DIFF_EXPERT);
-    keyDiff5Last = d5; keyDiff6Last = d6; keyDiff7Last = d7;
+    bool d8 = glfwGetKey(window, GLFW_KEY_8) == GLFW_PRESS;
+    bool d9 = glfwGetKey(window, GLFW_KEY_9) == GLFW_PRESS;
+    if (d7 && !keyDiff7Last) SetCurrentZoneDifficulty(DIFF_EASY);
+    if (d8 && !keyDiff8Last) SetCurrentZoneDifficulty(DIFF_MEDIUM);
+    if (d9 && !keyDiff9Last) SetCurrentZoneDifficulty(DIFF_EXPERT);
+    keyDiff7Last = d7; keyDiff8Last = d8; keyDiff9Last = d9;
 
     // ==========================================
     // CONTROLES ESTRICTOS POR ZONA
@@ -2271,6 +2373,54 @@ void processInput(GLFWwindow* window) {
         if (kKey && !kLast) InvernaderoHit(2);
         if (lKey && !lLast) InvernaderoHit(3);
         hLast = hKey; jLast = jKey; kLast = kKey; lLast = lKey;
+
+        // --- Minijuego ESPECTROGRAFIA ---
+        // V = iniciar/reiniciar el desafio de espectro. La camara se bloquea
+        //     siguiendo la trayectoria del meteorito y el jugador cambia el
+        //     color con 1=H-alpha 2=H-beta 3=H-gamma 4=Na/Sun.
+        // TAB = interrumpir.
+        static bool vLast = false;
+        bool vKey = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
+        if (vKey && !vLast) {
+            InitEspectroGame();
+            gEspectro.active = true;
+            // Apagamos el ritmo de plantas para no superponer dos vistas.
+            gInvernadero.active = false;
+            gInvernadero.topDown = false;
+            if (!gMinigameCamLocked) {
+                gCamModeBeforeLock = cameraMode;
+                gMinigameCamLocked = true;
+            }
+            PushNarrative("ESPECTRO: usa 1 (H-a) 2 (H-b) 3 (H-g) 4 (Na) al ritmo del meteoro.");
+        }
+        vLast = vKey;
+
+        if (gEspectro.active) {
+            // Cambio de color por teclas 1..4. Reusamos las teclas numericas
+            // porque las de zona (1..4) tienen flanco propio y solo se
+            // disparan cuando esta zona ya esta activa, no hay conflicto.
+            static bool e1Last=false, e2Last=false, e3Last=false, e4Last=false;
+            bool e1 = glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS;
+            bool e2 = glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS;
+            bool e3 = glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS;
+            bool e4 = glfwGetKey(window, GLFW_KEY_4) == GLFW_PRESS;
+            if (e1 && !e1Last) EspectroSetColor(0);
+            if (e2 && !e2Last) EspectroSetColor(1);
+            if (e3 && !e3Last) EspectroSetColor(2);
+            if (e4 && !e4Last) EspectroSetColor(3);
+            e1Last = e1; e2Last = e2; e3Last = e3; e4Last = e4;
+
+            // TAB interrumpe el espectro
+            static bool tabIntEsp = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntEsp) {
+                gEspectro.active = false;
+                gMinigameCamLocked = false;
+                cameraMode = gCamModeBeforeLock;
+                PushNarrative("Espectrografia interrumpida.");
+            }
+            tabIntEsp = tabInt;
+        }
     }
     else {
         keyPLast = false;
@@ -2358,10 +2508,7 @@ void processInput(GLFWwindow* window) {
                 gCamModeBeforeLock = cameraMode;
                 gMinigameCamLocked = true;
             }
-            // Coloca al jugador frente al panel para que el clic sea comodo
-            player.position = glm::vec3(0.0f, 0.0f, 9.0f);
-            player.yaw = 0.0f;
-            PushNarrative("ENERGIA: memoriza la secuencia de las pilas y haz clic en orden.");
+            PushNarrative("ENERGIA: pila central derecha (R_2). Memoriza el orden y haz clic.");
             std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
@@ -2517,15 +2664,18 @@ void InitInvernaderoGame() {
     gInvernadero.misses = 0;
     for (int i = 0; i < 4; i++) gInvernadero.waterEffect[i] = 0.0f;
 
-    // Parametros segun dificultad
+    // Parametros segun dificultad. En FACIL usamos solo 2 macetas (carriles
+    // 0 y 1), en MEDIO y EXPERTO los 4 carriles disponibles.
     int    totalNotes;
     float  spacing;          // separacion media entre notas (s)
+    int    numLanes;
     switch (gInvernadero.difficulty) {
-    case DIFF_EASY:   totalNotes = 20; spacing = 1.4f; break;
-    case DIFF_MEDIUM: totalNotes = 30; spacing = 0.9f; break;
-    case DIFF_EXPERT: totalNotes = 45; spacing = 0.55f; break;
-    default:          totalNotes = 20; spacing = 1.4f; break;
+    case DIFF_EASY:   totalNotes = 16; spacing = 1.4f; numLanes = 2; break;
+    case DIFF_MEDIUM: totalNotes = 30; spacing = 0.9f; numLanes = 4; break;
+    case DIFF_EXPERT: totalNotes = 45; spacing = 0.55f; numLanes = 4; break;
+    default:          totalNotes = 16; spacing = 1.4f; numLanes = 2; break;
     }
+    gInvernadero.activeLanes = numLanes;
 
     float t = 2.5f; // primer nota tras 2.5s de margen
     int lastLane = -1;
@@ -2533,7 +2683,7 @@ void InitInvernaderoGame() {
     for (int i = 0; i < totalNotes; i++) {
         OsuNote n;
         int lane;
-        do { lane = rand() % 4; } while (lane == lastLane && (rand() % 3 != 0));
+        do { lane = rand() % numLanes; } while (lane == lastLane && (rand() % 3 != 0));
         n.lane = lane;
         n.hitTime = t;
         gInvernadero.notes.push_back(n);
@@ -2575,12 +2725,33 @@ void InvernaderoHit(int lane) {
         if (gInvernadero.combo > gInvernadero.maxCombo) gInvernadero.maxCombo = gInvernadero.combo;
         int bonus = 100 + gInvernadero.combo * 5;
         gInvernadero.score += bonus;
+
+        // Spawn de gotas de agua sobre la maceta acertada (animacion de riego)
+        glm::vec3 base = INV_PLANT_POSITIONS[lane];
+        for (int k = 0; k < 14; ++k) {
+            WaterDrop d;
+            float rx = ((float)rand() / RAND_MAX - 0.5f) * 0.7f;
+            float rz = ((float)rand() / RAND_MAX - 0.5f) * 0.7f;
+            d.pos = base + glm::vec3(rx, 2.5f + ((float)rand() / RAND_MAX) * 0.5f, rz);
+            d.vy = -2.0f - ((float)rand() / RAND_MAX) * 1.5f;
+            d.life = 1.4f;
+            d.lane = lane;
+            gInvernadero.drops.push_back(d);
+        }
+
+        // Feedback al jugador
+        if (gInvernadero.combo % 5 == 0 && gInvernadero.combo > 0) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "Combo x%d ! Sigue regando.", gInvernadero.combo);
+            PushNarrative(buf);
+        }
         std::cout << "[OSU] HIT  carril " << lane << "  combo=" << gInvernadero.combo
                   << "  score=" << gInvernadero.score << std::endl;
     }
     else {
         gInvernadero.combo = 0;
         gInvernadero.misses++;
+        PushNarrative("Fallaste el ritmo, atinale a la maceta cuando llegue la nota.");
         std::cout << "[OSU] MISS carril " << lane << std::endl;
     }
 }
@@ -2591,6 +2762,17 @@ void UpdateInvernaderoGame(float dt) {
         gInvernadero.waterEffect[i] -= dt * 2.0f;
         if (gInvernadero.waterEffect[i] < 0.0f) gInvernadero.waterEffect[i] = 0.0f;
     }
+    // Integrar gotas de agua que cayeron al regar
+    for (auto& d : gInvernadero.drops) {
+        d.vy -= 9.0f * dt;
+        d.pos.y += d.vy * dt;
+        d.life -= dt;
+        if (d.pos.y < 0.1f) { d.pos.y = 0.1f; d.life = std::min(d.life, 0.05f); }
+    }
+    gInvernadero.drops.erase(
+        std::remove_if(gInvernadero.drops.begin(), gInvernadero.drops.end(),
+                       [](const WaterDrop& d) { return d.life <= 0.0f; }),
+        gInvernadero.drops.end());
     // Marcar como missed cualquier nota cuyo tiempo ya paso fuera de ventana
     float graceMiss = 0.35f;
     bool allDone = true;
@@ -2635,11 +2817,15 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         glm::vec4(0.20f, 0.55f, 1.00f, 1.0f)  // der adelante azul
     };
 
-    // 1) Pequenio marcador plano (disco) sobre cada maceta para indicar
+    int lanes = gInvernadero.activeLanes;
+    if (lanes < 2) lanes = 2;
+    if (lanes > 4) lanes = 4;
+
+    // 1) Pequenio marcador plano (disco) sobre cada maceta ACTIVA para indicar
     //    donde caera la nota. Se respetan las macetas originales del modelo
     //    INVERNADERO_OPACO; este disco apenas roza el piso (y = 0.02) y
     //    "florece" cuando recibimos un acierto (waterEffect).
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < lanes; i++) {
         glm::vec3 base = INV_PLANT_POSITIONS[i];
         base.y = 0.02f;
         float pulse = 0.55f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
@@ -2650,13 +2836,38 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        // disco delgado, ancho radial pero achatado verticalmente
         m = glm::scale(m, glm::vec3(0.85f + waterBoost * 0.5f,
                                     0.85f + waterBoost * 0.5f,
                                     0.05f));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+
+    // 1b) Capa de transparencia de color encima de las macetas activas: un
+    //     cilindro semi-translucido que envuelve la maceta original sin
+    //     ocultarla. Asi el jugador identifica facil cuales son los carriles.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+    for (int i = 0; i < lanes; i++) {
+        glm::vec3 base = INV_PLANT_POSITIONS[i];
+        base.y = 0.4f;
+        float pulse = 0.50f + 0.25f * sinf(gInvernadero.gameTime * 1.8f + i);
+        glm::vec4 c = laneColors[i];
+        c.a = 0.35f + 0.15f * pulse + gInvernadero.waterEffect[i] * 0.30f;
+        SetMaterial(phongShader, c * 0.5f, c, glm::vec4(0.2f), 16);
+        phongShader->setFloat("transparency", c.a);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, base);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(1.1f, 1.1f, 0.9f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+    phongShader->setFloat("transparency", 1.0f);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     // 2) Notas: se acercan horizontalmente desde el muro exterior de su
     //    fila. Aparecen lookAhead segundos antes y desaparecen 0.4 s
@@ -2665,6 +2876,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     float scrollDist = 5.5f; // unidades que recorre la nota antes de llegar
     for (auto& n : gInvernadero.notes) {
         if (n.hit || n.missed) continue;
+        if (n.lane >= lanes) continue;
         float tToHit = n.hitTime - gInvernadero.gameTime;
         if (tToHit > lookAhead) continue;
         if (tToHit < -0.4f) continue;
@@ -2686,6 +2898,25 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+
+    // 3) Gotas de agua: pequenios cubos translucidos azules que caen hacia la
+    //    maceta justo despues de acertar. Da la sensacion de regar.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    for (const WaterDrop& d : gInvernadero.drops) {
+        glm::vec4 c(0.45f, 0.75f, 1.0f, glm::clamp(d.life, 0.0f, 1.0f));
+        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.9f, 0.9f, 1.0f, 1.0f), 64);
+        phongShader->setFloat("transparency", c.a);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, d.pos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.12f, 0.12f, 0.18f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+    phongShader->setFloat("transparency", 1.0f);
+    glDisable(GL_BLEND);
 }
 
 // ============ ENERGIA (Simon) ============
@@ -2728,11 +2959,20 @@ void EnergiaPress(int button) {
             gEnergia.phase = 1;            // volver a mostrar patron
             gEnergia.phaseTimer = 0.6f;     // pausa antes de mostrar
             gEnergia.showIndex = -1;
+            char buf[80];
+            snprintf(buf, sizeof(buf), "Patron correcto! Nivel %d. Atento al nuevo orden.", gEnergia.level);
+            PushNarrative(buf);
             std::cout << "[Simon] NIVEL " << gEnergia.level
                       << "  Score=" << gEnergia.score << std::endl;
+        } else {
+            PushNarrative("Vas bien, sigue con la secuencia.");
         }
     }
     else {
+        char buf[100];
+        snprintf(buf, sizeof(buf), "Fallaste! Esperaba el boton %d. Score final %d.",
+                 expected, gEnergia.score);
+        PushNarrative(buf);
         std::cout << "[Simon] FALLO. Esperaba " << expected
                   << " y se presiono " << button
                   << ".  Score final=" << gEnergia.score << std::endl;
@@ -2954,6 +3194,7 @@ void CapsulasCheckNearest() {
     }
 
     if (best < 0) {
+        PushNarrative("Acercate mas a una capsula para revisarla.");
         std::cout << "[Capsulas] Acercate mas a una capsula para revisarla." << std::endl;
         return;
     }
@@ -2963,10 +3204,17 @@ void CapsulasCheckNearest() {
 
     if (best == gCapsulas.intruderIdx) {
         gCapsulas.win = true;
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Intruso atrapado en la capsula %d ! Te sobraron %.1fs.",
+                 best, gCapsulas.timeLeft);
+        PushNarrative(buf);
         std::cout << "[Capsulas] INTRUSO ATRAPADO en capsula " << best
                   << "  Tiempo restante=" << gCapsulas.timeLeft << "s" << std::endl;
     }
     else {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Capsula %d vacia. Sigue buscando.", best);
+        PushNarrative(buf);
         std::cout << "[Capsulas] Capsula " << best << " vacia." << std::endl;
     }
 }
@@ -3045,4 +3293,142 @@ void DrawCapsulasGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+}
+
+// ============ ESPECTROGRAFIA DEL METEORITO ============
+// El minijuego "espectro" se desarrolla en la zona invernadero a la par del
+// rytmo de plantas: sirve para que el jugador identifique las cuatro lineas
+// espectrales mas comunes en astronomia. ESPECTRO_COLORS/NAMES estan
+// declarados arriba para que SpawnMoonTrail pueda usarlos.
+
+void InitEspectroGame() {
+    gEspectro.pattern.clear();
+    gEspectro.patternIdx = 0;
+    gEspectro.currentColor = 0;
+    gEspectro.score = 0;
+    gEspectro.hits = 0;
+    gEspectro.misses = 0;
+    gEspectro.combo = 0;
+    gEspectro.maxCombo = 0;
+    gEspectro.lastFeedbackTimer = 0.0f;
+
+    int totalBeats;
+    switch (gEspectro.difficulty) {
+    case DIFF_EASY:   totalBeats = 10; gEspectro.beatInterval = 2.0f; break;
+    case DIFF_MEDIUM: totalBeats = 15; gEspectro.beatInterval = 1.3f; break;
+    case DIFF_EXPERT: totalBeats = 22; gEspectro.beatInterval = 0.85f; break;
+    default:          totalBeats = 10; gEspectro.beatInterval = 2.0f; break;
+    }
+    gEspectro.beatTimer = gEspectro.beatInterval + 1.0f; // pequeno preview
+
+    srand(98765);
+    int last = -1;
+    for (int i = 0; i < totalBeats; ++i) {
+        int v;
+        do { v = rand() % 4; } while (v == last);
+        gEspectro.pattern.push_back(v);
+        last = v;
+    }
+}
+
+void EspectroSetColor(int idx) {
+    if (!gEspectro.active) return;
+    if (idx < 0 || idx > 3) return;
+    gEspectro.currentColor = idx;
+}
+
+void UpdateEspectroGame(float dt) {
+    if (gEspectro.lastFeedbackTimer > 0.0f) gEspectro.lastFeedbackTimer -= dt;
+    if (gEspectro.patternIdx >= (int)gEspectro.pattern.size()) return;
+
+    gEspectro.beatTimer -= dt;
+    if (gEspectro.beatTimer > 0.0f) return;
+
+    int target = gEspectro.pattern[gEspectro.patternIdx];
+    bool hit = (gEspectro.currentColor == target);
+    gEspectro.lastFeedbackTimer = 0.8f;
+    gEspectro.lastHit = hit;
+    if (hit) {
+        gEspectro.hits++;
+        gEspectro.combo++;
+        if (gEspectro.combo > gEspectro.maxCombo) gEspectro.maxCombo = gEspectro.combo;
+        gEspectro.score += 100 + gEspectro.combo * 10;
+        if (gEspectro.combo % 4 == 0) {
+            char buf[100];
+            snprintf(buf, sizeof(buf), "Espectro alineado x%d ! Score %d.",
+                     gEspectro.combo, gEspectro.score);
+            PushNarrative(buf);
+        }
+    } else {
+        gEspectro.combo = 0;
+        gEspectro.misses++;
+        char buf[120];
+        snprintf(buf, sizeof(buf), "Linea esperada: %s. Tocaste %s.",
+                 ESPECTRO_NAMES[target], ESPECTRO_NAMES[gEspectro.currentColor]);
+        PushNarrative(buf);
+    }
+    gEspectro.patternIdx++;
+    gEspectro.beatTimer = gEspectro.beatInterval;
+
+    if (gEspectro.patternIdx >= (int)gEspectro.pattern.size()) {
+        char buf[120];
+        snprintf(buf, sizeof(buf), "Espectro completo! Aciertos %d/%d  Score %d",
+                 gEspectro.hits, (int)gEspectro.pattern.size(), gEspectro.score);
+        PushNarrative(buf);
+    }
+}
+
+// Posicion del meteorito en el mundo en el instante t. La orbita es la misma
+// que usa la zona invernadero al renderizar MOON2 (radio 15 a 11 m de altura
+// sobre y=11, plano XZ rotado -90 grados en torno al eje X). Devolvemos la
+// posicion ya transformada al espacio mundo para que la camara la siga.
+glm::vec3 EspectroMeteorPos(float t) {
+    float mt = t * 0.3f;
+    float radius = 15.0f;
+    glm::mat4 moonMat(1.0f);
+    moonMat = glm::translate(moonMat, glm::vec3(0.0f, 11.0f, -12.5f));
+    moonMat = glm::rotate(moonMat, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    moonMat = glm::scale(moonMat, glm::vec3(0.5f));
+    glm::vec3 local(radius * cosf(mt), radius * sinf(mt), 0.0f);
+    return glm::vec3(moonMat * glm::vec4(local, 1.0f));
+}
+
+void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
+    // El meteorito se dibuja en case 1 (INVERNADERO) usando proceduralShader.
+    // Aqui solo dibujamos los 4 indicadores espectrales orbitando junto al
+    // meteorito como "objetivos" para que el jugador identifique el target.
+    if (!CAJA_MODELO) return;
+    float t = (float)glfwGetTime();
+    glm::vec3 mpos = EspectroMeteorPos(t);
+
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    // El siguiente target del patron determina el "halo" que se muestra
+    int targetIdx = (gEspectro.patternIdx < (int)gEspectro.pattern.size())
+                    ? gEspectro.pattern[gEspectro.patternIdx] : -1;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    for (int i = 0; i < 4; ++i) {
+        float ang = t * 0.8f + i * glm::radians(90.0f);
+        glm::vec3 pos = mpos + glm::vec3(cosf(ang) * 1.8f, sinf(ang) * 0.6f,
+                                          sinf(ang) * 1.8f);
+        glm::vec4 c = ESPECTRO_COLORS[i];
+        float boost = (i == targetIdx) ? 2.0f : 0.6f;
+        c.a = (i == targetIdx) ? 0.95f : 0.45f;
+        SetMaterial(phongShader, c * 0.5f, c * boost, glm::vec4(0.8f), 16);
+        phongShader->setFloat("transparency", c.a);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, pos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::rotate(m, ang, glm::vec3(0.0f, 0.0f, 1.0f));
+        m = glm::scale(m, glm::vec3(0.45f + (i == targetIdx ? 0.20f : 0.0f)));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+    phongShader->setFloat("transparency", 1.0f);
+    glDisable(GL_BLEND);
 }
