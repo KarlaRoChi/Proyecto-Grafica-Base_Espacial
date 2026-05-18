@@ -70,6 +70,11 @@ void InitEspectroGame();
 void UpdateEspectroGame(float dt);
 void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view);
 void EspectroSetColor(int spectralIdx);
+// Posicion del meteorito y chase cam que lo sigue por su orbita. Se
+// declaran aqui porque ComputeView (definida antes) los usa cuando el
+// minijuego de espectrografia esta activo.
+glm::vec3 EspectroMeteorPos(float t);
+void EspectroChaseCam(glm::vec3& eye, glm::vec3& target);
 
 void InitEnergiaGame();
 void UpdateEnergiaGame(float dt);
@@ -297,6 +302,32 @@ void PushNarrative(const std::string& msg) {
     gNarrativeQueue.push_back(msg);
     if (gNarrativeTimer <= 0.0f) gNarrativeTimer = NARRATIVE_DURATION;
 }
+
+// Vacia la cola de narrativa por completo. Se usa al cambiar de zona para
+// que los mensajes contextuales del modulo anterior no sigan reproduciendose
+// despues del teleport (con cada salto se empujan 2 mensajes de ~4.5 s, asi
+// que al saltar rapido entre 3-4 zonas se acumulaban 10+ s de texto stale).
+void ClearNarrative() {
+    gNarrativeQueue.clear();
+    gNarrativeTimer = 0.0f;
+}
+
+// === MODO DE JUEGO (HISTORIA/RECORRIDO vs LIBRE) ===
+// El modo HISTORIA guia al jugador por las 5 zonas en orden (HUB, INV, REC,
+// ENE, CAP), empujando la narrativa de cada modulo y explicando la tarea.
+// Se avanza manualmente con N para que cada jugador respete su propio ritmo
+// (puede quedarse a probar el minijuego antes de seguir). El modo LIBRE es
+// exploracion sin guion, identico al comportamiento previo del proyecto.
+// El jugador alterna entre modos desde el menu de pausa.
+enum GameMode { MODE_LIBRE = 0, MODE_RECORRIDO = 1 };
+GameMode gGameMode = MODE_LIBRE;
+int gRecorridoStep = 0; // 0..4 -> indice dentro de RECORRIDO_ORDER
+const int RECORRIDO_ORDER[5] = { 0, 1, 2, 3, 4 }; // HUB, INV, REC, ENE, CAP
+
+void StartRecorrido();
+void AdvanceRecorridoStep();
+void PauseRecorrido();
+void ResumeRecorrido();
 
 // === BLOQUEO DE CAMARA PARA MINIJUEGOS ===
 // Cuando un minijuego pide "vista fija" (top-down invernadero, panel Simon)
@@ -877,11 +908,18 @@ void ChangeZone(int z) {
     gEspectro.active = false;
     gMinigameCamLocked = false;
 
+    // Si el jugador venia con mensajes pendientes (intro o de la zona
+    // anterior), los soltamos: al cambiar de modulo lo unico relevante es
+    // la narrativa del modulo nuevo. Esto evita el "lag" de mensajes
+    // viejos que se reproducian segundos despues del teleport cuando se
+    // saltaba rapido entre zonas.
+    ClearNarrative();
+
     // Narrativa contextual por zona (estilo recorrido guiado).
     switch (z) {
     case 0:
-        PushNarrative("HUB CENTRAL: cuatro puertas doradas te llevan a las salas.");
-        PushNarrative("Atraviesa una puerta o usa las teclas 1-4 para teletransportarte.");
+        PushNarrative("HUB CENTRAL: cuatro puertas doradas conectan los modulos de la estacion.");
+        PushNarrative("Atraviesa una puerta o pulsa 1-4 para teletransportarte.");
         break;
     case 1:
         PushNarrative("INVERNADERO: aqui crecen los cultivos de la estacion.");
@@ -889,17 +927,78 @@ void ChangeZone(int z) {
         break;
     case 2:
         PushNarrative("RECICLAJE: clasifica los desechos por tipo de material.");
-        PushNarrative("Tarea: ordena la chatarra con las cajas. Pulsa B para empezar.");
+        PushNarrative("Tarea: ordena los desechos en las cajas correctas. Pulsa B para empezar.");
         break;
     case 3:
         PushNarrative("ENERGIA: el reactor necesita un patron de encendido.");
-        PushNarrative("Tarea: clica los botones de las pilas en el orden que se iluminen. Pulsa B.");
+        PushNarrative("Tarea: pulsa los botones de las pilas en el orden indicado. Pulsa B para empezar.");
         break;
     case 4:
         PushNarrative("CAPSULAS: un intruso se infiltro en una de las criocamaras.");
-        PushNarrative("Tarea: revisa cada capsula con F. Pulsa B para empezar la ronda.");
+        PushNarrative("Tarea: revisa cada capsula con F. Pulsa B para empezar.");
         break;
     }
+}
+
+// ============ RECORRIDO GUIADO ============
+// El recorrido es un guion lineal de 5 pasos (HUB -> INV -> REC -> ENE ->
+// CAP). Cada paso teletransporta al jugador a la zona y empuja un mensaje
+// recordatorio para que sepa que el recorrido sigue activo y como avanzar.
+// El jugador puede pausar en cualquier momento (vuelve a modo LIBRE
+// conservando el paso actual) y reanudar despues; tambien puede mover por
+// el mundo con WASD durante el recorrido, N solo es para saltar al siguiente
+// modulo de la secuencia.
+
+void StartRecorrido() {
+    gGameMode = MODE_RECORRIDO;
+    gRecorridoStep = 0;
+    // ChangeZone limpia narrativa y empuja los 2 mensajes del HUB; los de
+    // recorrido quedan justo despues en la cola.
+    ChangeZone(RECORRIDO_ORDER[gRecorridoStep]);
+    PushNarrative("RECORRIDO: te guiare por los 5 modulos en orden.");
+    PushNarrative("Pulsa N para pasar al siguiente modulo o ESC para pausar.");
+}
+
+void AdvanceRecorridoStep() {
+    if (gGameMode != MODE_RECORRIDO) return;
+    gRecorridoStep++;
+    if (gRecorridoStep >= 5) {
+        // Recorrido completo: regresamos al HUB y bajamos a modo libre.
+        gRecorridoStep = 0;
+        gGameMode = MODE_LIBRE;
+        ChangeZone(RECORRIDO_ORDER[0]);
+        PushNarrative("Recorrido completo. Ahora exploras en modo libre.");
+        PushNarrative("Reactivalo desde el menu (ESC) cuando quieras.");
+        return;
+    }
+    ChangeZone(RECORRIDO_ORDER[gRecorridoStep]);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "RECORRIDO %d/5: %s. Prueba el minijuego o pulsa N para continuar.",
+             gRecorridoStep + 1, rooms[RECORRIDO_ORDER[gRecorridoStep]].name.c_str());
+    PushNarrative(buf);
+}
+
+void PauseRecorrido() {
+    if (gGameMode != MODE_RECORRIDO) return;
+    gGameMode = MODE_LIBRE;
+    PushNarrative("Recorrido pausado. Tienes el control libre.");
+    PushNarrative("Reanudalo desde el menu (ESC) cuando quieras seguir.");
+}
+
+void ResumeRecorrido() {
+    if (gGameMode != MODE_LIBRE) return;
+    gGameMode = MODE_RECORRIDO;
+    // Teletransportamos al jugador al modulo donde se quedo el recorrido
+    // (mas intuitivo que dejarlo donde estaba paseando). ChangeZone limpia
+    // narrativa y empuja la guia de la zona; el mensaje de "reanudado"
+    // queda detras en la cola.
+    ChangeZone(RECORRIDO_ORDER[gRecorridoStep]);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "RECORRIDO %d/5 reanudado en %s. Pulsa N para continuar.",
+             gRecorridoStep + 1, rooms[RECORRIDO_ORDER[gRecorridoStep]].name.c_str());
+    PushNarrative(buf);
 }
 
 // ============ START ============
@@ -1072,13 +1171,16 @@ glm::mat4 ComputeView() {
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
-        // Camara persigue el meteorito desde una posicion fija dentro del
-        // invernadero (un poco arriba y atras del cometa) -> la trayectoria
-        // hace que la camara nunca este estable, parte del reto del jugador.
-        float t = (float)glfwGetTime();
-        glm::vec3 meteor = EspectroMeteorPos(t);
-        glm::vec3 anchor(0.0f, 5.5f, -7.0f); // posicion del observador
-        return glm::lookAt(anchor, meteor, glm::vec3(0.0f, 1.0f, 0.0f));
+        // Chase cam real: la camara viaja con el meteorito en su propia
+        // orbita, anclada detras del cometa (sobre su tangente de avance)
+        // con una pequena elevacion. El target se proyecta ligeramente
+        // adelante para que el jugador anticipe el beat y la composicion
+        // tenga sensacion de movimiento. La math vive en EspectroChaseCam
+        // para que ComputeEyePos use el mismo eye y la iluminacion sea
+        // consistente con la vista.
+        glm::vec3 eye, target;
+        EspectroChaseCam(eye, target);
+        return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
         // Vista fija frente a la pila R_2 (centro entre los 4 botones de esa pila)
@@ -1139,7 +1241,9 @@ glm::vec3 ComputeEyePos() {
         return glm::vec3(0.0f, 14.0f, -9.99f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
-        return glm::vec3(0.0f, 5.5f, -7.0f);
+        glm::vec3 eye, target;
+        EspectroChaseCam(eye, target);
+        return eye;
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
         return glm::vec3(2.8f, 2.0f, 8.5f);
@@ -1277,8 +1381,8 @@ bool Update() {
     // Mostrar la intro una sola vez al inicio del programa
     if (!gIntroShown) {
         PushNarrative("Bienvenido a la estacion espacial sustentable.");
-        PushNarrative("Explora 4 modulos y completa las tareas de cada uno.");
-        PushNarrative("Mueve al avatar con WASD, mira con el mouse. ESC abre el menu.");
+        PushNarrative("Explora los 4 modulos y completa la tarea de cada uno.");
+        PushNarrative("Muevete con WASD, mira con el mouse. Pulsa ESC para el menu.");
         gIntroShown = true;
     }
 
@@ -1776,6 +1880,21 @@ void DrawTextCentered(const std::string& text, float cx, float y, float scale, g
 
 static const char* kZoneNames[5] = { "HUB", "INVERNADERO", "RECICLAJE", "ENERGIA", "CAPSULAS" };
 
+// Etiqueta del primer item del menu (toggle del recorrido). Depende del modo
+// actual y del paso: si nunca empezo el recorrido decimos "Iniciar", si esta
+// activo "Pausar", y si esta pausado a mitad "Reanudar (X/5)".
+static std::string RecorridoMenuLabel() {
+    if (gGameMode == MODE_RECORRIDO) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Pausar recorrido (%d/5)", gRecorridoStep + 1);
+        return buf;
+    }
+    if (gRecorridoStep == 0) return "Iniciar recorrido guiado";
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Reanudar recorrido (%d/5)", gRecorridoStep + 1);
+    return buf;
+}
+
 void DrawPauseMenu() {
     // Fondo oscuro semitransparente
     glDisable(GL_DEPTH_TEST);
@@ -1784,8 +1903,8 @@ void DrawPauseMenu() {
 
     DrawQuad2D(0.0f, 0.0f, (float)SCR_WIDTH, (float)SCR_HEIGHT, glm::vec4(0.0f, 0.0f, 0.05f, 0.65f));
 
-    // Panel central
-    float panelW = 420.0f, panelH = 380.0f;
+    // Panel central: subi la altura porque ahora hay 5 opciones en lugar de 4.
+    float panelW = 460.0f, panelH = 440.0f;
     float panelX = (SCR_WIDTH - panelW) * 0.5f;
     float panelY = (SCR_HEIGHT - panelH) * 0.5f;
     DrawQuad2D(panelX, panelY, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.92f));
@@ -1797,11 +1916,22 @@ void DrawPauseMenu() {
     DrawTextCentered("PAUSA", cx, panelY + panelH - 70.0f, 1.0f, glm::vec3(0.95f, 0.82f, 0.35f));
     DrawTextCentered(std::string("Zona: ") + kZoneNames[currentZone], cx,
                      panelY + panelH - 110.0f, 0.55f, glm::vec3(0.85f, 0.88f, 0.95f));
+    DrawTextCentered(std::string("Modo: ") + (gGameMode == MODE_RECORRIDO ? "HISTORIA" : "LIBRE"),
+                     cx, panelY + panelH - 138.0f, 0.50f,
+                     gGameMode == MODE_RECORRIDO
+                         ? glm::vec3(0.40f, 0.90f, 0.65f)
+                         : glm::vec3(0.70f, 0.78f, 0.95f));
 
-    const char* options[4] = { "Continuar", "Controles", "Mapa", "Salir" };
-    float yBase = panelY + panelH - 170.0f;
-    float lineH = 50.0f;
-    for (int i = 0; i < 4; ++i) {
+    std::string recLabel = RecorridoMenuLabel();
+    // "Continuar" se mantiene como la primera opcion para preservar el habito
+    // de cerrar el menu con Enter; el toggle del recorrido entra justo debajo
+    // donde sigue siendo el primer destino al pulsar abajo o pasar el mouse.
+    const std::string options[5] = {
+        "Continuar", recLabel, "Controles", "Mapa", "Salir"
+    };
+    float yBase = panelY + panelH - 180.0f;
+    float lineH = 46.0f;
+    for (int i = 0; i < 5; ++i) {
         float y = yBase - i * lineH;
         if (i == menuSelection) {
             DrawQuad2D(panelX + 30.0f, y - 10.0f, panelW - 60.0f, 38.0f,
@@ -1810,7 +1940,7 @@ void DrawPauseMenu() {
         glm::vec3 col = (i == menuSelection)
             ? glm::vec3(1.0f, 0.95f, 0.55f)
             : glm::vec3(0.80f, 0.85f, 0.92f);
-        DrawTextCentered(options[i], cx, y, 0.70f, col);
+        DrawTextCentered(options[i], cx, y, 0.68f, col);
     }
     DrawTextCentered("Flechas para navegar, Enter para seleccionar, ESC para volver",
                      cx, panelY + 22.0f, 0.40f, glm::vec3(0.55f, 0.60f, 0.70f));
@@ -1849,7 +1979,8 @@ void DrawControlsOverlay() {
         { "Menu pausa",               "ESC" },
         { "Mapa rapido",              "M" },
         { "Ir a zona (HUB..Capsulas)","0 1 2 3 4" },
-        { "Dificultad zona",          "5 / 6 / 7" }
+        { "Dificultad zona",          "5 / 6 / 7" },
+        { "Recorrido: siguiente paso","N" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
 
@@ -2017,6 +2148,17 @@ static std::vector<std::string> BuildHelpLines() {
     std::vector<std::string> out;
     Difficulty d = CurrentHelpDifficulty();
 
+    // Linea de modo: si el recorrido esta activo se ve siempre en cualquier
+    // dificultad para que el jugador no se olvide del progreso. En modo
+    // libre la omitimos para no quitar lugar a las pistas de cada zona.
+    if (gGameMode == MODE_RECORRIDO) {
+        char buf[140];
+        snprintf(buf, sizeof(buf),
+                 "RECORRIDO %d/5: %s  (N=siguiente modulo, ESC=pausar)",
+                 gRecorridoStep + 1, kZoneNames[RECORRIDO_ORDER[gRecorridoStep]]);
+        out.push_back(buf);
+    }
+
     if (d <= DIFF_EASY) {
         out.push_back("WASD para moverte  |  Shift correr  |  Espacio saltar");
         out.push_back("ESC abre el menu  |  TAB oculta el mapa");
@@ -2031,7 +2173,7 @@ static std::vector<std::string> BuildHelpLines() {
         }
         break;
     case 1: // INVERNADERO
-        out.push_back("B = ritmo macetas (H J K L)  |  V = espectrografia meteoro (1 2 3 4)");
+        out.push_back("B = ritmo macetas (H J K L)  |  V = espectrografia meteorito (1 2 3 4)");
         if (d <= DIFF_MEDIUM) out.push_back("G alterna vista cenital  |  P/O hace crecer/resetea el helecho");
         if (d <= DIFF_EASY)   out.push_back("Espectro: 1 H-a (rojo)  2 H-b (cyan)  3 H-g (violeta)  4 Na (amarillo)");
         if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
@@ -2176,10 +2318,10 @@ void processInput(GLFWwindow* window) {
                      (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS);
 
         if (menuState == MENU_PAUSE) {
-            if (up && !kUpLast) menuSelection = (menuSelection + 3) % 4;
-            if (dn && !kDnLast) menuSelection = (menuSelection + 1) % 4;
+            if (up && !kUpLast) menuSelection = (menuSelection + 4) % 5;
+            if (dn && !kDnLast) menuSelection = (menuSelection + 1) % 5;
 
-            // Hover y clic con el mouse sobre los 4 botones del menu de pausa.
+            // Hover y clic con el mouse sobre los 5 botones del menu de pausa.
             // Replicamos la misma geometria que dibuja DrawPauseMenu para que
             // las hitboxes coincidan exactamente con lo que ve el jugador.
             double mxd, myd;
@@ -2189,13 +2331,13 @@ void processInput(GLFWwindow* window) {
             // HUD pone Y=0 en la parte inferior, asi que invertimos.
             float my = (float)SCR_HEIGHT - (float)myd;
 
-            float panelW = 420.0f, panelH = 380.0f;
+            float panelW = 460.0f, panelH = 440.0f;
             float panelX = (SCR_WIDTH  - panelW) * 0.5f;
             float panelY = (SCR_HEIGHT - panelH) * 0.5f;
-            float yBase = panelY + panelH - 170.0f;
-            float lineH = 50.0f;
+            float yBase = panelY + panelH - 180.0f;
+            float lineH = 46.0f;
             int hover = -1;
-            for (int i = 0; i < 4; ++i) {
+            for (int i = 0; i < 5; ++i) {
                 float y = yBase - i * lineH - 10.0f;
                 float h = 38.0f;
                 float x1 = panelX + 30.0f;
@@ -2213,10 +2355,15 @@ void processInput(GLFWwindow* window) {
             if ((enter && !kEnterLast) || clicked) {
                 switch (menuSelection) {
                 case 0: menuState = MENU_NONE; break;                   // Continuar
-                case 1: menuState = MENU_CONTROLS; break;               // Controles
-                case 2: showMinimap = !showMinimap;                     // Mapa (toggle)
+                case 1: // Toggle recorrido: iniciar / pausar / reanudar segun estado
+                    if (gGameMode == MODE_RECORRIDO)       PauseRecorrido();
+                    else if (gRecorridoStep == 0)          StartRecorrido();
+                    else                                    ResumeRecorrido();
+                    menuState = MENU_NONE; break;
+                case 2: menuState = MENU_CONTROLS; break;               // Controles
+                case 3: showMinimap = !showMinimap;                     // Mapa (toggle)
                         menuState = MENU_NONE; break;
-                case 3: glfwSetWindowShouldClose(window, true); break;  // Salir
+                case 4: glfwSetWindowShouldClose(window, true); break;  // Salir
                 }
             }
         } else if (menuState == MENU_CONTROLS) {
@@ -2285,6 +2432,17 @@ void processInput(GLFWwindow* window) {
     if (d9 && !keyDiff9Last) SetCurrentZoneDifficulty(DIFF_EXPERT);
     keyDiff7Last = d7; keyDiff8Last = d8; keyDiff9Last = d9;
 
+    // N = avanzar al siguiente modulo del RECORRIDO GUIADO (solo si esta
+    // activo). En modo libre la N se reusa para el color cyan del cometa
+    // dentro del invernadero, asi que aqui solo procesamos el flanco
+    // global cuando el recorrido manda.
+    static bool keyNGlobalLast = false;
+    bool nGlobal = glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS;
+    if (nGlobal && !keyNGlobalLast && gGameMode == MODE_RECORRIDO) {
+        AdvanceRecorridoStep();
+    }
+    keyNGlobalLast = nGlobal;
+
     // ==========================================
     // CONTROLES ESTRICTOS POR ZONA
     // ==========================================
@@ -2311,14 +2469,19 @@ void processInput(GLFWwindow* window) {
         keyOLast = oPressed;
 
         // Colores del cometa SOLO en invernadero (N=cyan, M=magenta, Y=yellow;
-        // la tecla C se reserva al minijuego Simon en otra zona)
+        // la tecla C se reserva al minijuego Simon en otra zona). Cuando el
+        // RECORRIDO esta activo, N se reusa como "siguiente paso" arriba,
+        // asi que aqui evitamos el doble disparo (N en recorrido no debe
+        // tambien cambiar el color del cometa).
         static bool nLast = false;
         static bool mLast = false;
         static bool yLast = false;
         bool nKey = glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS;
         bool mKey = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
         bool yKey = glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS;
-        if (nKey && !nLast) { moonTrailMode = 0; std::cout << "CYAN"    << std::endl; }
+        if (nKey && !nLast && gGameMode != MODE_RECORRIDO) {
+            moonTrailMode = 0; std::cout << "CYAN" << std::endl;
+        }
         if (mKey && !mLast) { moonTrailMode = 1; std::cout << "MAGENTA" << std::endl; }
         if (yKey && !yLast) { moonTrailMode = 2; std::cout << "YELLOW"  << std::endl; }
         nLast = nKey;
@@ -2337,12 +2500,12 @@ void processInput(GLFWwindow* window) {
                 gCamModeBeforeLock = cameraMode;
                 gMinigameCamLocked = true;
             }
-            PushNarrative("INVERNADERO: riega las plantas con H J K L cuando la nota llegue.");
+            PushNarrative("INVERNADERO: pulsa H J K L cuando la nota llegue a su maceta.");
             std::cout << "[Invernadero] Nueva partida (dificultad " << gInvernadero.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
 
-        // TAB interrumpe el desafio (sale de la vista cenital y suelta camara)
+        // TAB interrumpe el minijuego (sale de la vista cenital y suelta camara)
         if (gMinigameCamLocked && gInvernadero.active) {
             static bool tabIntLast = false;
             bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
@@ -2351,7 +2514,7 @@ void processInput(GLFWwindow* window) {
                 gInvernadero.topDown = false;
                 gMinigameCamLocked = false;
                 cameraMode = gCamModeBeforeLock;
-                PushNarrative("Desafio del invernadero interrumpido.");
+                PushNarrative("Minijuego de invernadero interrumpido.");
             }
             tabIntLast = tabInt;
         }
@@ -2391,7 +2554,7 @@ void processInput(GLFWwindow* window) {
                 gCamModeBeforeLock = cameraMode;
                 gMinigameCamLocked = true;
             }
-            PushNarrative("ESPECTRO: usa 1 (H-a) 2 (H-b) 3 (H-g) 4 (Na) al ritmo del meteoro.");
+            PushNarrative("ESPECTROGRAFIA: pulsa 1 (H-a) 2 (H-b) 3 (H-g) 4 (Na) al ritmo del meteorito.");
         }
         vLast = vKey;
 
@@ -2417,7 +2580,7 @@ void processInput(GLFWwindow* window) {
                 gEspectro.active = false;
                 gMinigameCamLocked = false;
                 cameraMode = gCamModeBeforeLock;
-                PushNarrative("Espectrografia interrumpida.");
+                PushNarrative("Minijuego de espectrografia interrumpido.");
             }
             tabIntEsp = tabInt;
         }
@@ -2441,8 +2604,8 @@ void processInput(GLFWwindow* window) {
         if (bKey && !keyBLast) {
             InitReciclajeGame();
             gReciclaje.active = true;
-            PushNarrative("RECICLAJE: ordena la basura segun el tipo de desecho.");
-            PushNarrative("Usa I J K L para mover la caja seleccionada y TAB para cambiar.");
+            PushNarrative("RECICLAJE: ordena los desechos segun el tipo de material.");
+            PushNarrative("Pulsa TAB para cambiar de caja e I J K L para moverla.");
             std::cout << "[Reciclaje] Nueva partida (dificultad " << gReciclaje.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
@@ -2508,12 +2671,12 @@ void processInput(GLFWwindow* window) {
                 gCamModeBeforeLock = cameraMode;
                 gMinigameCamLocked = true;
             }
-            PushNarrative("ENERGIA: pila central derecha (R_2). Memoriza el orden y haz clic.");
+            PushNarrative("ENERGIA: memoriza el orden de las luces. Pulsa Z X C V o haz clic en el boton.");
             std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
 
-        // TAB = interrumpir el desafio
+        // TAB = interrumpir el minijuego
         if (gMinigameCamLocked && gEnergia.active) {
             static bool tabIntEn = false;
             bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
@@ -2521,7 +2684,7 @@ void processInput(GLFWwindow* window) {
                 gEnergia.active = false;
                 gMinigameCamLocked = false;
                 cameraMode = gCamModeBeforeLock;
-                PushNarrative("Desafio de energia interrumpido.");
+                PushNarrative("Minijuego de energia interrumpido.");
             }
             tabIntEn = tabInt;
         }
@@ -2576,7 +2739,7 @@ void processInput(GLFWwindow* window) {
         if (bKey && !keyBLast) {
             InitCapsulasGame();
             gCapsulas.active = true;
-            PushNarrative("CAPSULAS: encuentra al intruso antes de que termine el tiempo.");
+            PushNarrative("CAPSULAS: pulsa F junto a una capsula para revisarla antes de que se acabe el tiempo.");
             std::cout << "[Capsulas] Nueva partida (dificultad " << gCapsulas.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
@@ -2742,7 +2905,7 @@ void InvernaderoHit(int lane) {
         // Feedback al jugador
         if (gInvernadero.combo % 5 == 0 && gInvernadero.combo > 0) {
             char buf[80];
-            snprintf(buf, sizeof(buf), "Combo x%d ! Sigue regando.", gInvernadero.combo);
+            snprintf(buf, sizeof(buf), "Combo x%d! Sigue regando.", gInvernadero.combo);
             PushNarrative(buf);
         }
         std::cout << "[OSU] HIT  carril " << lane << "  combo=" << gInvernadero.combo
@@ -2751,7 +2914,7 @@ void InvernaderoHit(int lane) {
     else {
         gInvernadero.combo = 0;
         gInvernadero.misses++;
-        PushNarrative("Fallaste el ritmo, atinale a la maceta cuando llegue la nota.");
+        PushNarrative("Fallaste el ritmo. Atinale a la maceta cuando llegue la nota.");
         std::cout << "[OSU] MISS carril " << lane << std::endl;
     }
 }
@@ -2960,17 +3123,17 @@ void EnergiaPress(int button) {
             gEnergia.phaseTimer = 0.6f;     // pausa antes de mostrar
             gEnergia.showIndex = -1;
             char buf[80];
-            snprintf(buf, sizeof(buf), "Patron correcto! Nivel %d. Atento al nuevo orden.", gEnergia.level);
+            snprintf(buf, sizeof(buf), "Patron correcto! Nivel %d. Memoriza el nuevo orden.", gEnergia.level);
             PushNarrative(buf);
             std::cout << "[Simon] NIVEL " << gEnergia.level
                       << "  Score=" << gEnergia.score << std::endl;
         } else {
-            PushNarrative("Vas bien, sigue con la secuencia.");
+            PushNarrative("Vas bien, sigue la secuencia.");
         }
     }
     else {
         char buf[100];
-        snprintf(buf, sizeof(buf), "Fallaste! Esperaba el boton %d. Score final %d.",
+        snprintf(buf, sizeof(buf), "Fallaste. Esperaba el boton %d. Score final %d.",
                  expected, gEnergia.score);
         PushNarrative(buf);
         std::cout << "[Simon] FALLO. Esperaba " << expected
@@ -3194,8 +3357,8 @@ void CapsulasCheckNearest() {
     }
 
     if (best < 0) {
-        PushNarrative("Acercate mas a una capsula para revisarla.");
-        std::cout << "[Capsulas] Acercate mas a una capsula para revisarla." << std::endl;
+        PushNarrative("Acercate a una capsula para revisarla.");
+        std::cout << "[Capsulas] Acercate a una capsula para revisarla." << std::endl;
         return;
     }
 
@@ -3205,7 +3368,7 @@ void CapsulasCheckNearest() {
     if (best == gCapsulas.intruderIdx) {
         gCapsulas.win = true;
         char buf[80];
-        snprintf(buf, sizeof(buf), "Intruso atrapado en la capsula %d ! Te sobraron %.1fs.",
+        snprintf(buf, sizeof(buf), "Intruso atrapado en la capsula %d! Te sobraron %.1fs.",
                  best, gCapsulas.timeLeft);
         PushNarrative(buf);
         std::cout << "[Capsulas] INTRUSO ATRAPADO en capsula " << best
@@ -3355,7 +3518,7 @@ void UpdateEspectroGame(float dt) {
         gEspectro.score += 100 + gEspectro.combo * 10;
         if (gEspectro.combo % 4 == 0) {
             char buf[100];
-            snprintf(buf, sizeof(buf), "Espectro alineado x%d ! Score %d.",
+            snprintf(buf, sizeof(buf), "Espectro alineado x%d! Score %d.",
                      gEspectro.combo, gEspectro.score);
             PushNarrative(buf);
         }
@@ -3363,7 +3526,7 @@ void UpdateEspectroGame(float dt) {
         gEspectro.combo = 0;
         gEspectro.misses++;
         char buf[120];
-        snprintf(buf, sizeof(buf), "Linea esperada: %s. Tocaste %s.",
+        snprintf(buf, sizeof(buf), "Linea esperada: %s. Pulsaste %s.",
                  ESPECTRO_NAMES[target], ESPECTRO_NAMES[gEspectro.currentColor]);
         PushNarrative(buf);
     }
@@ -3372,7 +3535,7 @@ void UpdateEspectroGame(float dt) {
 
     if (gEspectro.patternIdx >= (int)gEspectro.pattern.size()) {
         char buf[120];
-        snprintf(buf, sizeof(buf), "Espectro completo! Aciertos %d/%d  Score %d",
+        snprintf(buf, sizeof(buf), "Espectro completo. Aciertos %d/%d. Score %d.",
                  gEspectro.hits, (int)gEspectro.pattern.size(), gEspectro.score);
         PushNarrative(buf);
     }
@@ -3391,6 +3554,25 @@ glm::vec3 EspectroMeteorPos(float t) {
     moonMat = glm::scale(moonMat, glm::vec3(0.5f));
     glm::vec3 local(radius * cosf(mt), radius * sinf(mt), 0.0f);
     return glm::vec3(moonMat * glm::vec4(local, 1.0f));
+}
+
+// Chase cam del meteorito: muestreamos la orbita un instante antes para
+// estimar la tangente y posicionar la camara detras del cometa, con una
+// pequena elevacion sobre el plano orbital. El target se proyecta un poco
+// adelante para que el jugador vea hacia donde se dirige el meteoro y
+// pueda anticipar el beat del minijuego de espectrografia.
+void EspectroChaseCam(glm::vec3& eye, glm::vec3& target) {
+    float t = (float)glfwGetTime();
+    glm::vec3 meteor = EspectroMeteorPos(t);
+    glm::vec3 prev   = EspectroMeteorPos(t - 0.10f);
+    glm::vec3 fwd    = meteor - prev;
+    if (glm::length(fwd) > 1e-4f) fwd = glm::normalize(fwd);
+    else                          fwd = glm::vec3(0.0f, 0.0f, -1.0f);
+    // 4 m atras y 1.6 m arriba: distancia suficiente para que los 4 halos
+    // espectrales (radio 1.8 m alrededor del meteoro) entren en cuadro,
+    // y el target adelante da sensacion de avance.
+    eye    = meteor - fwd * 4.0f + glm::vec3(0.0f, 1.6f, 0.0f);
+    target = meteor + fwd * 1.5f;
 }
 
 void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
