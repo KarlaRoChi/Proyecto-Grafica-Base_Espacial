@@ -85,6 +85,7 @@ enum CameraMode { CAM_FREE = 0, CAM_FIRST = 1, CAM_SECOND = 2, CAM_THIRD = 3 };
 struct Player {
     glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f);
     float yaw = 0.0f;
+    float pitch = -8.0f;     // inclinacion de la camara (mirar arriba/abajo)
     float walkSpeed = 2.2f;
     float sprintMult = 1.9f;
     float turnSpeed = 110.0f;
@@ -276,6 +277,27 @@ bool showMinimap = true;
 std::string gZoneBanner;
 float gZoneBannerTimer = 0.0f;
 const float ZONE_BANNER_DURATION = 2.5f;
+
+// === NARRATIVA GUIADA ===
+// Cola de mensajes contextuales (estilo "Bienvenido a la estacion..."). Cada
+// entrada se muestra durante NARRATIVE_DURATION y luego pasa al siguiente.
+// Se acumulan al entrar a una zona o al iniciar un minijuego.
+std::vector<std::string> gNarrativeQueue;
+float gNarrativeTimer = 0.0f;
+const float NARRATIVE_DURATION = 4.5f;
+bool gIntroShown = false;
+
+void PushNarrative(const std::string& msg) {
+    gNarrativeQueue.push_back(msg);
+    if (gNarrativeTimer <= 0.0f) gNarrativeTimer = NARRATIVE_DURATION;
+}
+
+// === BLOQUEO DE CAMARA PARA MINIJUEGOS ===
+// Cuando un minijuego pide "vista fija" (top-down invernadero, panel Simon)
+// guardamos el modo de camara previo y bloqueamos los controles de mouse.
+// TAB durante el minijuego sirve de "interrumpir" para liberar la camara.
+bool gMinigameCamLocked = false;
+CameraMode gCamModeBeforeLock = CAM_THIRD;
 
 // Modelos
 Model* HUB_OPACO = nullptr;
@@ -483,6 +505,11 @@ void SetMaterial(Shader* shader, glm::vec4 ambient, glm::vec4 diffuse, glm::vec4
 }
 
 
+// Construye AABBs en coordenadas de mundo a partir de cada mesh del FBX.
+// Solo nos quedamos con "props" claros (mesas, atril, macetas, pilas, capsulas).
+// Lo que parezca geometria de la sala (paredes, pisos, techos) se descarta: el
+// rect del Room ya cubre esos limites y si lo metieramos como collider podria
+// engulir la posicion del jugador y dejarlo trabado al spawnear.
 void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase) {
     if (!modelo) return;
     for (size_t i = 0; i < modelo->meshes.size(); i++) {
@@ -494,10 +521,20 @@ void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transform
             minAABB = glm::min(minAABB, glm::vec3(posMundo));
             maxAABB = glm::max(maxAABB, glm::vec3(posMundo));
         }
-        if (maxAABB.y < 0.2f) continue;
         float anchoX = maxAABB.x - minAABB.x;
+        float anchoY = maxAABB.y - minAABB.y;
         float anchoZ = maxAABB.z - minAABB.z;
-        if (anchoX > 12.0f || anchoZ > 12.0f) continue;
+
+        // Filtros tipo prop:
+        //   - footprint pequenio (no es pared ni piso entero)
+        //   - debe sobresalir del piso al menos 30 cm
+        //   - no debe abarcar TODA la sala (evita atrapar al jugador)
+        if (anchoX > 5.0f || anchoZ > 5.0f) continue;
+        if (anchoY > 4.0f) continue;
+        if (maxAABB.y < 0.30f) continue;        // decal / LED en el piso
+        if (minAABB.y > 2.5f) continue;          // colgado del techo
+        if (anchoX < 0.05f && anchoZ < 0.05f) continue; // mesh degenerado
+
         autoColliders[zoneIndex].push_back({ minAABB, maxAABB });
     }
 }
@@ -701,11 +738,31 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone) {
     if (zone < 0 || zone >= 5) return false;
     Room& r = rooms[zone];
 
+    // Bounds de la habitacion
     if (pos.x - radius < r.boundsMin.x) return true;
     if (pos.x + radius > r.boundsMax.x) return true;
     if (pos.z - radius < r.boundsMin.y) return true;
     if (pos.z + radius > r.boundsMax.y) return true;
 
+    // Colisiones AABB vs cilindro del jugador. Solo tomamos en cuenta colliders
+    // cuya altura (max.y) supera el tobillo y cuyo min.y este bajo la cabeza,
+    // para no bloquear con marcadores de techo ni con LEDs del piso.
+    const float playerFootY = pos.y;
+    const float playerHeadY = pos.y + PLAYER_HEIGHT;
+    for (const AABB& a : autoColliders[zone]) {
+        if (a.max.y < playerFootY + 0.15f) continue; // alfombra/piso: ignorar
+        if (a.min.y > playerHeadY) continue;          // cuelga del techo: ignorar
+        // Si el jugador ya esta DENTRO del AABB (en el plano XZ), no lo
+        // consideramos colision: si lo hicieramos, quedaria atrapado al
+        // spawnear y WASD no podria sacarlo de ahi.
+        if (pos.x > a.min.x && pos.x < a.max.x &&
+            pos.z > a.min.z && pos.z < a.max.z) continue;
+        float cx = glm::clamp(pos.x, a.min.x, a.max.x);
+        float cz = glm::clamp(pos.z, a.min.z, a.max.z);
+        float dx = pos.x - cx;
+        float dz = pos.z - cz;
+        if (dx * dx + dz * dz < radius * radius) return true;
+    }
     return false;
 }
 
@@ -731,23 +788,37 @@ void ChangeZone(int z) {
     gZoneBanner = rooms[z].name;
     gZoneBannerTimer = ZONE_BANNER_DURATION;
 
-    // Al entrar a una zona con minijuego, inicializarlo automaticamente
-    if (z == 1) {
-        InitInvernaderoGame();
-        gInvernadero.active = true;
-        gInvernadero.topDown = true;
-    }
-    if (z == 2) {
-        InitReciclajeGame();
-        gReciclaje.active = true;
-    }
-    if (z == 3) {
-        InitEnergiaGame();
-        gEnergia.active = true;
-    }
-    if (z == 4) {
-        InitCapsulasGame();
-        gCapsulas.active = true;
+    // Al cambiar de zona apagamos cualquier minijuego pendiente y soltamos la
+    // camara. Los minijuegos solo arrancan al pulsar B en cada sala.
+    gInvernadero.active = false;
+    gInvernadero.topDown = false;
+    gReciclaje.active = false;
+    gEnergia.active = false;
+    gCapsulas.active = false;
+    gMinigameCamLocked = false;
+
+    // Narrativa contextual por zona (estilo recorrido guiado).
+    switch (z) {
+    case 0:
+        PushNarrative("HUB CENTRAL: cuatro puertas doradas te llevan a las salas.");
+        PushNarrative("Atraviesa una puerta o usa las teclas 1-4 para teletransportarte.");
+        break;
+    case 1:
+        PushNarrative("INVERNADERO: aqui crecen los cultivos de la estacion.");
+        PushNarrative("Tarea: riega las plantas siguiendo el ritmo. Pulsa B para empezar.");
+        break;
+    case 2:
+        PushNarrative("RECICLAJE: clasifica los desechos por tipo de material.");
+        PushNarrative("Tarea: ordena la chatarra con las cajas. Pulsa B para empezar.");
+        break;
+    case 3:
+        PushNarrative("ENERGIA: el reactor necesita un patron de encendido.");
+        PushNarrative("Tarea: clica los botones de las pilas en el orden que se iluminen. Pulsa B.");
+        break;
+    case 4:
+        PushNarrative("CAPSULAS: un intruso se infiltro en una de las criocamaras.");
+        PushNarrative("Tarea: revisa cada capsula con F. Pulsa B para empezar la ronda.");
+        break;
     }
 }
 
@@ -911,6 +982,8 @@ bool Start() {
 }
 
 // ============ CAMARA ============
+// Cuando un minijuego pide vista fija (top-down invernadero, panel Simon)
+// devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
         // Centro ajustado al medio de las dos filas de macetas (z = -11).
@@ -918,14 +991,44 @@ glm::mat4 ComputeView() {
         glm::vec3 eye(0.0f, 16.0f, -10.99f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
+    if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
+        // Vista fija frente al panel del reactor (centro entre los 4 botones)
+        glm::vec3 center(0.0f, 1.7f, 11.5f);
+        glm::vec3 eye  (0.0f, 2.4f,  8.0f);
+        return glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
-    glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
+    // forward incorpora yaw (horizontal) y pitch (vertical) para que el mouse
+    // pueda inclinar la mirada hacia arriba/abajo en 1ra/3ra/2da persona.
+    float yawR   = glm::radians(player.yaw);
+    float pitchR = glm::radians(player.pitch);
+    glm::vec3 fwd = glm::vec3(
+        sinf(yawR) * cosf(pitchR),
+        sinf(pitchR),
+        cosf(yawR) * cosf(pitchR)
+    );
+    // fwdFlat: forward sin pitch (para colocar las camaras de seguimiento)
+    glm::vec3 fwdFlat = glm::vec3(sinf(yawR), 0.0f, cosf(yawR));
     glm::vec3 eye, target;
     const float headHeight = 1.7f, distBack = 4.5f, distFront = 4.5f, camHeight = 2.8f;
     switch (cameraMode) {
-    case CAM_FIRST:  eye = player.position + glm::vec3(0.0f, headHeight, 0.0f); target = eye + fwd; break;
-    case CAM_THIRD:  eye = player.position - fwd * distBack + glm::vec3(0.0f, camHeight, 0.0f); target = player.position + glm::vec3(0.0f, 1.2f, 0.0f); break;
-    case CAM_SECOND: eye = player.position + fwd * distFront + glm::vec3(0.0f, camHeight, 0.0f); target = player.position + glm::vec3(0.0f, 1.2f, 0.0f); break;
+    case CAM_FIRST:
+        eye = player.position + glm::vec3(0.0f, headHeight, 0.0f);
+        target = eye + fwd;
+        break;
+    case CAM_THIRD: {
+        // La orbita en 3ra persona usa el pitch para subir/bajar la altura
+        glm::vec3 back = -fwdFlat * distBack;
+        eye = player.position + back + glm::vec3(0.0f, camHeight + player.pitch * 0.04f, 0.0f);
+        target = player.position + glm::vec3(0.0f, 1.2f + player.pitch * 0.015f, 0.0f);
+        break;
+    }
+    case CAM_SECOND: {
+        glm::vec3 front = fwdFlat * distFront;
+        eye = player.position + front + glm::vec3(0.0f, camHeight + player.pitch * 0.04f, 0.0f);
+        target = player.position + glm::vec3(0.0f, 1.2f + player.pitch * 0.015f, 0.0f);
+        break;
+    }
     default: return camera.GetViewMatrix();
     }
     return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
@@ -935,11 +1038,14 @@ glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
         return glm::vec3(0.0f, 14.0f, -9.99f);
     }
+    if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
+        return glm::vec3(0.0f, 2.4f, 8.0f);
+    }
     if (cameraMode == CAM_FREE) return camera.Position;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
-    if (cameraMode == CAM_FIRST)  return player.position + glm::vec3(0, 1.7f, 0);
-    if (cameraMode == CAM_THIRD)  return player.position - fwd * 4.5f + glm::vec3(0, 2.8f, 0);
-    if (cameraMode == CAM_SECOND) return player.position + fwd * 4.5f + glm::vec3(0, 2.8f, 0);
+    if (cameraMode == CAM_FIRST)  return player.position + glm::vec3(0.0f, 1.7f, 0.0f);
+    if (cameraMode == CAM_THIRD)  return player.position - fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
+    if (cameraMode == CAM_SECOND) return player.position + fwd * 4.5f + glm::vec3(0.0f, 2.8f + player.pitch * 0.04f, 0.0f);
     return camera.Position;
 }
 
@@ -958,9 +1064,10 @@ void UpdateCharacter(float dt) {
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
     glm::vec3 movement(0.0f);
 
-    // El avatar solo se mueve cuando NO estamos en camara libre (para evitar
-    // que WASD controle simultaneamente al jugador y a la camara libre).
-    if (cameraMode != CAM_FREE) {
+    // El avatar solo se mueve cuando NO estamos en camara libre y cuando no
+    // estamos dentro de un minijuego con camara bloqueada (en ese caso WASD
+    // queda inactivo para que el jugador se concentre en la tarea).
+    if (cameraMode != CAM_FREE && !gMinigameCamLocked) {
         bool sprint = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)  == GLFW_PRESS) ||
                       (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
         float speed = player.walkSpeed * (sprint ? player.sprintMult : 1.0f);
@@ -1036,8 +1143,40 @@ bool Update() {
     processInput(window);
     UpdateCharacter(deltaTime);
 
+    // Cursor visible cuando el menu esta abierto o cuando jugamos Simon (clic).
+    // Solo llamamos glfwSetInputMode cuando el estado cambia para que GLFW no
+    // teletransporte el cursor cada frame; y reseteamos firstMouse en cada
+    // transicion para que el siguiente xoffset/yoffset no produzca un salto
+    // gigantesco en el yaw del jugador.
+    static bool prevWantCursor = false;
+    bool wantCursor = (menuState != MENU_NONE) ||
+                      (currentZone == 3 && gEnergia.active && gMinigameCamLocked);
+    if (wantCursor != prevWantCursor) {
+        glfwSetInputMode(window, GLFW_CURSOR,
+                         wantCursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+        firstMouse = true;
+        prevWantCursor = wantCursor;
+    }
+
     if (menuState == MENU_NONE && gZoneBannerTimer > 0.0f) {
         gZoneBannerTimer -= deltaTime;
+    }
+
+    // Mostrar la intro una sola vez al inicio del programa
+    if (!gIntroShown) {
+        PushNarrative("Bienvenido a la estacion espacial sustentable.");
+        PushNarrative("Explora 4 modulos y completa las tareas de cada uno.");
+        PushNarrative("Mueve al avatar con WASD, mira con el mouse. ESC abre el menu.");
+        gIntroShown = true;
+    }
+
+    // Procesa la cola de narrativa: cada mensaje vive NARRATIVE_DURATION s.
+    if (menuState == MENU_NONE && !gNarrativeQueue.empty()) {
+        gNarrativeTimer -= deltaTime;
+        if (gNarrativeTimer <= 0.0f) {
+            gNarrativeQueue.erase(gNarrativeQueue.begin());
+            gNarrativeTimer = gNarrativeQueue.empty() ? 0.0f : NARRATIVE_DURATION;
+        }
     }
 
     // --- Logica de minijuegos --- (pausada cuando el menu esta abierto)
@@ -1169,10 +1308,33 @@ bool Update() {
     int alphaOpaque = 32;
 
 
-    glm::vec4 ambMetal = glm::vec4(0.03f, 0.03f, 0.03f, 1.0f);
-    glm::vec4 diffMetal = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
-    glm::vec4 specMetal = glm::vec4(12.0f, 12.0f, 12.0f, 1.0f);
-    int alphaMetal = 2048;
+    // Material metalico mas pulido: specular muy alto y un tono base mas claro
+    // para que se note el brillo tipo cromo y el highlight a contraluz.
+    glm::vec4 ambMetal = glm::vec4(0.06f, 0.06f, 0.07f, 1.0f);
+    glm::vec4 diffMetal = glm::vec4(0.65f, 0.66f, 0.70f, 1.0f);
+    glm::vec4 specMetal = glm::vec4(20.0f, 20.0f, 22.0f, 1.0f);
+    int alphaMetal = 4096;
+
+    // Helper local para overlay tipo "fresnel rim": redibuja el mismo modelo
+    // con phongShader mezclando con un specular casi blanco que solo se nota
+    // en los bordes (alphaIndex muy alto). Es barato y funciona con el shader
+    // ya existente.
+    auto DrawMetalFresnelOverlay = [&](Model* m, const glm::mat4& modelMat) {
+        if (!m) return;
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        phongShader->use();
+        phongShader->setMat4("model", modelMat);
+        phongShader->setFloat("transparency", 0.45f);
+        SetMaterial(phongShader,
+            glm::vec4(0.0f),
+            glm::vec4(0.10f, 0.12f, 0.15f, 1.0f),
+            glm::vec4(35.0f, 35.0f, 40.0f, 1.0f),
+            8192);
+        m->Draw(*phongShader);
+        phongShader->setFloat("transparency", 1.0f);
+        glDisable(GL_BLEND);
+    };
 
 
     switch (currentZone) {
@@ -1383,8 +1545,13 @@ bool Update() {
     case 2: // RECICLAJE
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (RECICLAJE_OPACO) RECICLAJE_OPACO->Draw(*phongShader);
+        // Pase metalico base + overlay fresnel/rim para que se vea brilloso
+        phongShader->setMat4("model", baseModelMat);
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
-        if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
+        if (RECICLAJE_METAL) {
+            RECICLAJE_METAL->Draw(*phongShader);
+            DrawMetalFresnelOverlay(RECICLAJE_METAL, baseModelMat);
+        }
 
         // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
         if (CAJA_MODELO) {
@@ -1409,8 +1576,13 @@ bool Update() {
     case 3: // ENERGIA
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (ENERGIA_OPACO) ENERGIA_OPACO->Draw(*phongShader);
+        // Pase metalico base + overlay fresnel/rim
+        phongShader->setMat4("model", baseModelMat);
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
-        if (ENERGIA_METALICO) ENERGIA_METALICO->Draw(*phongShader);
+        if (ENERGIA_METALICO) {
+            ENERGIA_METALICO->Draw(*phongShader);
+            DrawMetalFresnelOverlay(ENERGIA_METALICO, baseModelMat);
+        }
 
         // ====== MINIJUEGO SIMON (Energia) ======
         if (gEnergia.active) DrawEnergiaGame(projection, view);
@@ -1456,7 +1628,9 @@ void InitHud() {
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/consola.ttf"
     };
-    gText->Init(fontTries, 32, "shaders/text.vs", "shaders/text.fs",
+    // Antes 32 px: el texto se veia diminuto. 48 px da letras claramente
+    // legibles en pantallas 1024x768 sin necesidad de subir mucho el scale.
+    gText->Init(fontTries, 48, "shaders/text.vs", "shaders/text.fs",
                 (int)SCR_WIDTH, (int)SCR_HEIGHT);
 }
 
@@ -1796,6 +1970,45 @@ void DrawInstructionsPanel() {
     glEnable(GL_DEPTH_TEST);
 }
 
+// Panel inferior central con el mensaje de narrativa actual. Tiene fade-in y
+// fade-out segun gNarrativeTimer para que se sienta como un dialogo guiado.
+void DrawNarrativePanel() {
+    if (gNarrativeQueue.empty()) return;
+    if (!gText || !gText->ready) return;
+
+    float t = gNarrativeTimer;
+    float fade;
+    if (t > NARRATIVE_DURATION - 0.4f) fade = (NARRATIVE_DURATION - t) / 0.4f;
+    else if (t < 0.6f)                 fade = t / 0.6f;
+    else                                fade = 1.0f;
+    fade = glm::clamp(fade, 0.0f, 1.0f);
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const std::string& msg = gNarrativeQueue.front();
+    float scale = 0.65f;
+    float w = gText->MeasureWidth(msg, scale);
+    float panelW = w + 70.0f;
+    if (panelW > (float)SCR_WIDTH - 40.0f) panelW = (float)SCR_WIDTH - 40.0f;
+    float panelH = 70.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = SCR_HEIGHT * 0.18f;
+
+    DrawQuad2D(panelX, panelY, panelW, panelH,
+               glm::vec4(0.03f, 0.06f, 0.10f, 0.82f * fade));
+    DrawQuad2D(panelX, panelY + panelH - 3.0f, panelW, 3.0f,
+               glm::vec4(0.35f, 0.85f, 1.0f, fade));
+    DrawQuad2D(panelX, panelY, panelW, 3.0f,
+               glm::vec4(0.35f, 0.85f, 1.0f, fade));
+
+    DrawTextCentered(msg, (float)SCR_WIDTH * 0.5f, panelY + 22.0f, scale,
+                     glm::vec3(0.92f, 0.95f, 1.0f) * fade);
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawHud() {
     if (!hudShader) return;
     // El HUD usa proyeccion ortografica que el callback de resize mantiene
@@ -1814,6 +2027,7 @@ void DrawHud() {
     DrawMinimap();
     DrawInstructionsPanel();
     DrawZoneBanner();
+    DrawNarrativePanel();
 }
 
 // ============ INPUT & CONTROLES ============
@@ -1837,6 +2051,7 @@ void processInput(GLFWwindow* window) {
     // --- Si el menu esta abierto, solo navegacion del menu ---
     if (menuState != MENU_NONE) {
         static bool kUpLast = false, kDnLast = false, kEnterLast = false;
+        static bool kMouseLast = false;
         bool up = (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) ||
                   (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
         bool dn = (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) ||
@@ -1848,7 +2063,39 @@ void processInput(GLFWwindow* window) {
         if (menuState == MENU_PAUSE) {
             if (up && !kUpLast) menuSelection = (menuSelection + 3) % 4;
             if (dn && !kDnLast) menuSelection = (menuSelection + 1) % 4;
-            if (enter && !kEnterLast) {
+
+            // Hover y clic con el mouse sobre los 4 botones del menu de pausa.
+            // Replicamos la misma geometria que dibuja DrawPauseMenu para que
+            // las hitboxes coincidan exactamente con lo que ve el jugador.
+            double mxd, myd;
+            glfwGetCursorPos(window, &mxd, &myd);
+            float mx = (float)mxd;
+            // En GLFW (0,0) es esquina superior izquierda; la proyeccion del
+            // HUD pone Y=0 en la parte inferior, asi que invertimos.
+            float my = (float)SCR_HEIGHT - (float)myd;
+
+            float panelW = 420.0f, panelH = 380.0f;
+            float panelX = (SCR_WIDTH  - panelW) * 0.5f;
+            float panelY = (SCR_HEIGHT - panelH) * 0.5f;
+            float yBase = panelY + panelH - 170.0f;
+            float lineH = 50.0f;
+            int hover = -1;
+            for (int i = 0; i < 4; ++i) {
+                float y = yBase - i * lineH - 10.0f;
+                float h = 38.0f;
+                float x1 = panelX + 30.0f;
+                float x2 = panelX + panelW - 30.0f;
+                if (mx >= x1 && mx <= x2 && my >= y && my <= y + h) {
+                    hover = i; break;
+                }
+            }
+            if (hover >= 0) menuSelection = hover;
+
+            bool mouseNow = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            bool clicked = (mouseNow && !kMouseLast && hover >= 0);
+            kMouseLast = mouseNow;
+
+            if ((enter && !kEnterLast) || clicked) {
                 switch (menuSelection) {
                 case 0: menuState = MENU_NONE; break;                   // Continuar
                 case 1: menuState = MENU_CONTROLS; break;               // Controles
@@ -1857,6 +2104,11 @@ void processInput(GLFWwindow* window) {
                 case 3: glfwSetWindowShouldClose(window, true); break;  // Salir
                 }
             }
+        } else if (menuState == MENU_CONTROLS) {
+            // En el overlay de controles, cualquier clic vuelve al menu pausa
+            bool mouseNow = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (mouseNow && !kMouseLast) menuState = MENU_PAUSE;
+            kMouseLast = mouseNow;
         }
         kUpLast = up;
         kDnLast = dn;
@@ -1956,15 +2208,35 @@ void processInput(GLFWwindow* window) {
         yLast = yKey;
 
         // --- Minijuego OSU ---
-        // B = iniciar/reiniciar partida, V = alternar vista cenital
+        // B = iniciar/reiniciar partida (activa vista cenital y bloqueo de
+        //     camara automaticamente). TAB durante el juego = "interrumpir".
         bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bKey && !keyBLast) {
             InitInvernaderoGame();
             gInvernadero.active = true;
             gInvernadero.topDown = true;
+            if (!gMinigameCamLocked) {
+                gCamModeBeforeLock = cameraMode;
+                gMinigameCamLocked = true;
+            }
+            PushNarrative("INVERNADERO: riega las plantas con H J K L cuando la nota llegue.");
             std::cout << "[Invernadero] Nueva partida (dificultad " << gInvernadero.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
+
+        // TAB interrumpe el desafio (sale de la vista cenital y suelta camara)
+        if (gMinigameCamLocked && gInvernadero.active) {
+            static bool tabIntLast = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntLast) {
+                gInvernadero.active = false;
+                gInvernadero.topDown = false;
+                gMinigameCamLocked = false;
+                cameraMode = gCamModeBeforeLock;
+                PushNarrative("Desafio del invernadero interrumpido.");
+            }
+            tabIntLast = tabInt;
+        }
 
         bool gKey = glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS;
         if (gKey && !keyGLast) {
@@ -1997,6 +2269,17 @@ void processInput(GLFWwindow* window) {
     // La logica de separar items (metal/vidrio/carton) se deja COMENTADA y lista.
     if (currentZone == 2) {
         float boxSpeed = 2.5f * deltaTime;
+
+        // B = iniciar el modulo de reciclaje (activa items y narrativa)
+        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bKey && !keyBLast) {
+            InitReciclajeGame();
+            gReciclaje.active = true;
+            PushNarrative("RECICLAJE: ordena la basura segun el tipo de desecho.");
+            PushNarrative("Usa I J K L para mover la caja seleccionada y TAB para cambiar.");
+            std::cout << "[Reciclaje] Nueva partida (dificultad " << gReciclaje.difficulty << ")" << std::endl;
+        }
+        keyBLast = bKey;
 
         bool tabKey = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
         if (tabKey && !keyTabLast) {
@@ -2050,16 +2333,37 @@ void processInput(GLFWwindow* window) {
 
     // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
     if (currentZone == 3) {
-        // B = iniciar/reiniciar partida
+        // B = iniciar/reiniciar partida (bloquea la camara frente al reactor)
         bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bKey && !keyBLast) {
             InitEnergiaGame();
             gEnergia.active = true;
+            if (!gMinigameCamLocked) {
+                gCamModeBeforeLock = cameraMode;
+                gMinigameCamLocked = true;
+            }
+            // Coloca al jugador frente al panel para que el clic sea comodo
+            player.position = glm::vec3(0.0f, 0.0f, 9.0f);
+            player.yaw = 0.0f;
+            PushNarrative("ENERGIA: memoriza la secuencia de las pilas y haz clic en orden.");
             std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
 
-        // Botones: Z X C V (las 4 baterias)
+        // TAB = interrumpir el desafio
+        if (gMinigameCamLocked && gEnergia.active) {
+            static bool tabIntEn = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntEn) {
+                gEnergia.active = false;
+                gMinigameCamLocked = false;
+                cameraMode = gCamModeBeforeLock;
+                PushNarrative("Desafio de energia interrumpido.");
+            }
+            tabIntEn = tabInt;
+        }
+
+        // Botones: Z X C V (las 4 baterias). Se mantiene para teclado.
         bool zKey = glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS;
         bool xKey = glfwGetKey(window, GLFW_KEY_X) == GLFW_PRESS;
         bool cKey = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
@@ -2070,14 +2374,35 @@ void processInput(GLFWwindow* window) {
         if (vKey && !keyVLast) EnergiaPress(3);
         keyZLast = zKey; keyXLast = xKey; keyCLast = cKey; keyVLast = vKey;
 
-        // ---- INTERACCION CON CLIC DEL MOUSE (LISTA, COMENTADA) ----
-        // Cuando se implemente, habilitar cursor visible al entrar a zona 3 y:
-        // if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        //     double mx, my; glfwGetCursorPos(window, &mx, &my);
-        //     // Proyectar cada SIMON_BUTTON_POSITIONS[i] al espacio pantalla con
-        //     // projection*view, comparar (mx,my) con la proyeccion y disparar
-        //     // EnergiaPress(i) si la distancia es menor a un radio en pixeles.
-        // }
+        // CLIC DEL MOUSE: cada boton Simon se proyecta a pantalla y comparamos
+        // con la posicion del cursor. Solo aceptamos clics si el juego esta
+        // en fase 2 (turno del jugador).
+        if (gEnergia.active) {
+            static bool mouseLast = false;
+            bool mouseNow = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (mouseNow && !mouseLast && gEnergia.phase == 2) {
+                double mx, my;
+                glfwGetCursorPos(window, &mx, &my);
+                glm::mat4 proj = glm::perspective(glm::radians(camera.Zoom),
+                    (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
+                glm::mat4 vw = ComputeView();
+                int bestIdx = -1;
+                float bestDist = 70.0f; // radio en px
+                for (int i = 0; i < 4; ++i) {
+                    glm::vec4 clip = proj * vw * glm::vec4(SIMON_BUTTON_POSITIONS[i], 1.0f);
+                    if (clip.w <= 0.0f) continue;
+                    glm::vec3 ndc = glm::vec3(clip) / clip.w;
+                    float sx = (ndc.x * 0.5f + 0.5f) * SCR_WIDTH;
+                    float sy = (1.0f - (ndc.y * 0.5f + 0.5f)) * SCR_HEIGHT;
+                    float dx = sx - (float)mx;
+                    float dy = sy - (float)my;
+                    float d = sqrtf(dx * dx + dy * dy);
+                    if (d < bestDist) { bestDist = d; bestIdx = i; }
+                }
+                if (bestIdx >= 0) EnergiaPress(bestIdx);
+            }
+            mouseLast = mouseNow;
+        }
     }
 
     // ZONA 4: CAPSULAS - Buscar al intruso
@@ -2088,6 +2413,7 @@ void processInput(GLFWwindow* window) {
         if (bKey && !keyBLast) {
             InitCapsulasGame();
             gCapsulas.active = true;
+            PushNarrative("CAPSULAS: encuentra al intruso antes de que termine el tiempo.");
             std::cout << "[Capsulas] Nueva partida (dificultad " << gCapsulas.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
@@ -2128,7 +2454,18 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     float xoffset = (float)xpos - lastX; float yoffset = lastY - (float)ypos;
     lastX = (float)xpos; lastY = (float)ypos;
     if (menuState != MENU_NONE) return;
-    if (cameraMode == CAM_FREE) camera.ProcessMouseMovement(xoffset, yoffset);
+    if (gMinigameCamLocked) return; // camara fija durante minijuego
+    if (cameraMode == CAM_FREE) {
+        camera.ProcessMouseMovement(xoffset, yoffset);
+    } else {
+        // En primera/segunda/tercera persona el mouse rota el yaw del jugador
+        // y el pitch controla la inclinacion vertical (mirar arriba/abajo).
+        const float SENS = 0.18f;
+        player.yaw   -= xoffset * SENS;
+        player.pitch += yoffset * SENS;
+        if (player.pitch >  85.0f) player.pitch =  85.0f;
+        if (player.pitch < -85.0f) player.pitch = -85.0f;
+    }
 }
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
     if (cameraMode == CAM_FREE) camera.ProcessMouseScroll((float)yoffset);
@@ -2138,34 +2475,18 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
 // ============         IMPLEMENTACION DE LOS MINIJUEGOS            ============
 // =============================================================================
 
+// Cambia la dificultad de la zona actual pero NO inicia el minijuego: el
+// jugador debe pulsar B para arrancar. Asi el ajuste 5/6/7 es solo un slider.
 void SetCurrentZoneDifficulty(Difficulty d) {
+    const char* difLbl[3] = { "FACIL", "MEDIO", "EXPERTO" };
     switch (currentZone) {
-    case 1:
-        gInvernadero.difficulty = d;
-        std::cout << "[Invernadero] Dificultad: " << d << std::endl;
-        InitInvernaderoGame();
-        gInvernadero.active = true;
-        break;
-    case 2:
-        gReciclaje.difficulty = d;
-        std::cout << "[Reciclaje] Dificultad: " << d << std::endl;
-        InitReciclajeGame();
-        gReciclaje.active = true;
-        break;
-    case 3:
-        gEnergia.difficulty = d;
-        std::cout << "[Energia] Dificultad: " << d << std::endl;
-        InitEnergiaGame();
-        gEnergia.active = true;
-        break;
-    case 4:
-        gCapsulas.difficulty = d;
-        std::cout << "[Capsulas] Dificultad: " << d << std::endl;
-        InitCapsulasGame();
-        gCapsulas.active = true;
-        break;
-    default: break;
+    case 1: gInvernadero.difficulty = d; break;
+    case 2: gReciclaje.difficulty   = d; break;
+    case 3: gEnergia.difficulty     = d; break;
+    case 4: gCapsulas.difficulty    = d; break;
+    default: return;
     }
+    std::cout << "[Zona " << currentZone << "] Dificultad: " << difLbl[(int)d] << std::endl;
 }
 
 // ============ INVERNADERO (OSU) ============
@@ -2448,13 +2769,35 @@ void UpdateEnergiaGame(float dt) {
 }
 
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    // Las pilas/botones de la zona ENERGIA son parte del modelo
-    // ENERGIA_OPACO; el "brillo" del minijuego Simon viene de los 4 point
-    // lights configurados en Update (slots 5..8 de gLights). Aqui no hace
-    // falta dibujar geometria extra: los botones existentes del modelo
-    // quedan iluminados con el color del estado actual del juego.
-    (void)projection;
-    (void)view;
+    if (!CAJA_MODELO) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    // Las pilas reales del modelo ya tienen botones; encima dibujamos un cubo
+    // de color para que el jugador identifique claramente los 4 botones del
+    // Simon y pueda hacer clic con el mouse. Cada cubo brilla con buttonGlow.
+    glm::vec4 simonColors[4] = {
+        glm::vec4(1.0f, 0.25f, 0.25f, 1.0f), // rojo
+        glm::vec4(0.25f, 1.0f, 0.30f, 1.0f), // verde
+        glm::vec4(0.30f, 0.55f, 1.0f, 1.0f), // azul
+        glm::vec4(1.0f, 0.95f, 0.25f, 1.0f)  // amarillo
+    };
+
+    float t = (float)glfwGetTime();
+    for (int i = 0; i < 4; ++i) {
+        float glow = gEnergia.buttonGlow[i];
+        float pulse = 0.55f + 0.20f * sinf(t * 2.5f + i);
+        glm::vec4 c = simonColors[i] * (pulse + glow * 1.8f);
+        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.7f), 32);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.55f + glow * 0.20f));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
 }
 
 // ============ RECICLAJE ============
