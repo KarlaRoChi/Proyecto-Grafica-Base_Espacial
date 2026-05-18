@@ -1,0 +1,1158 @@
+/*
+* PROYECTO INDIVIDUAL: Base Espacial Sustentable
+* Alumna: Rojas Chimal Karla Beatriz
+*
+*/
+
+#include <iostream>
+#include <stdlib.h>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <cmath>
+#include <exception>
+#include <float.h>
+#include <algorithm>
+
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+#include <shader_m.h>
+#include <camera.h>
+#include <model.h>
+#include <animatedmodel.h>
+#include <light.h>
+#include <cubemap.h>
+
+// ============ FORWARD DECLARATIONS ============
+bool Start();
+bool Update();
+void framebuffer_size_callback(GLFWwindow* window, int width, int height);
+void mouse_callback(GLFWwindow* window, double xpos, double ypos);
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
+void processInput(GLFWwindow* window);
+void SetLightUniforms(Shader* shader);
+void SetMaterial(Shader* shader, glm::vec4 ambient, glm::vec4 diffuse, glm::vec4 specular, int alpha);
+Model* CargarModelo(const std::string& ruta);
+
+glm::mat4 ComputeView();
+glm::vec3 ComputeEyePos();
+void UpdateCharacter(float dt);
+void DrawCharacter(const glm::mat4& projection, const glm::mat4& view);
+bool CheckCollision(glm::vec3 pos, float radius, int zone);
+void ChangeZone(int z);
+void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase);
+
+// ============ TIPOS ============
+enum CameraMode { CAM_FREE = 0, CAM_FIRST = 1, CAM_SECOND = 2, CAM_THIRD = 3 };
+
+struct Player {
+    glm::vec3 position = glm::vec3(0.0f, 0.0f, 0.0f);
+    float yaw = 0.0f;
+    float walkSpeed = 2.2f;
+    float turnSpeed = 110.0f;
+    bool  isWalking = false;
+};
+
+struct AABB {
+    glm::vec3 min;
+    glm::vec3 max;
+};
+
+struct Room {
+    std::string name;
+    glm::vec3 spawnPos;
+    float     spawnYaw;
+    glm::vec2 boundsMin;
+    glm::vec2 boundsMax;
+    glm::vec3 freeCamPos;
+};
+
+struct InteractiveBox {
+    glm::vec3 position;
+    glm::vec3 startPos;
+    float rotationY = 0.0f;
+    float scale = 1.0f;
+};
+
+
+struct TrailParticle {
+    glm::vec3 pos;
+    glm::vec3 vel;
+    glm::vec4 color;
+    float life;
+    float maxLife;
+    float size;
+};
+
+// ============ PLANTA FRACTAL (L-SYSTEM HELECHO) ============
+struct TurtleState {
+    glm::vec3 pos;
+    glm::vec3 dir;
+};
+
+class FractalPlant {
+public:
+    unsigned int VAO, VBO;
+    int vertexCount = 0;
+    bool initialized = false;
+
+    void Generate(int iterations) {
+        if (initialized) {
+            glDeleteVertexArrays(1, &VAO);
+            glDeleteBuffers(1, &VBO);
+            initialized = false;
+            vertexCount = 0;
+        }
+
+        if (iterations <= 0) return;
+
+        std::string current = "X";
+        for (int i = 0; i < iterations; i++) {
+            std::string next = "";
+            for (char c : current) {
+                if (c == 'X') next += "F-[[X]+X]+F[+FX]-X";
+                else if (c == 'F') next += "FF";
+                else next += c;
+            }
+            current = next;
+        }
+
+        std::vector<float> vertices;
+        std::vector<TurtleState> stack;
+        TurtleState state;
+        state.pos = glm::vec3(0.0f);
+        state.dir = glm::vec3(0.0f, 1.0f, 0.0f);
+
+        float length = 0.25f / pow(1.5f, iterations - 1);
+        float angle = glm::radians(25.0f);
+
+        for (char c : current) {
+            if (c == 'F') {
+                glm::vec3 nextPos = state.pos + state.dir * length;
+                vertices.push_back(state.pos.x); vertices.push_back(state.pos.y); vertices.push_back(state.pos.z);
+                vertices.push_back(0.0f); vertices.push_back(1.0f); vertices.push_back(0.0f);
+                vertices.push_back(0.0f); vertices.push_back(0.0f);
+                vertices.push_back(nextPos.x); vertices.push_back(nextPos.y); vertices.push_back(nextPos.z);
+                vertices.push_back(0.0f); vertices.push_back(1.0f); vertices.push_back(0.0f);
+                vertices.push_back(1.0f); vertices.push_back(1.0f);
+                state.pos = nextPos;
+            }
+            else if (c == '+') {
+                glm::mat4 rot = glm::rotate(glm::mat4(1.0f), angle, glm::vec3(0.0f, 0.0f, 1.0f));
+                rot = glm::rotate(rot, angle * 0.5f, glm::vec3(1.0f, 0.0f, 0.0f));
+                state.dir = glm::normalize(glm::vec3(rot * glm::vec4(state.dir, 0.0f)));
+            }
+            else if (c == '-') {
+                glm::mat4 rot = glm::rotate(glm::mat4(1.0f), -angle, glm::vec3(0.0f, 0.0f, 1.0f));
+                rot = glm::rotate(rot, -angle * 0.5f, glm::vec3(1.0f, 0.0f, 0.0f));
+                state.dir = glm::normalize(glm::vec3(rot * glm::vec4(state.dir, 0.0f)));
+            }
+            else if (c == '[') {
+                stack.push_back(state);
+            }
+            else if (c == ']') {
+                state = stack.back();
+                stack.pop_back();
+            }
+        }
+
+        glGenVertexArrays(1, &VAO);
+        glGenBuffers(1, &VBO);
+        glBindVertexArray(VAO);
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+
+        vertexCount = vertices.size() / 8;
+        initialized = true;
+    }
+
+    void Draw(Shader& shader, glm::mat4 modelMatrix) {
+        if (!initialized || vertexCount == 0) return;
+        shader.use();
+        shader.setMat4("model", modelMatrix);
+        glBindVertexArray(VAO);
+        glDrawArrays(GL_LINES, 0, vertexCount);
+        glBindVertexArray(0);
+    }
+};
+
+// ============ GLOBALES ============
+GLFWwindow* window;
+const unsigned int SCR_WIDTH = 1024;
+const unsigned int SCR_HEIGHT = 768;
+
+Camera camera(glm::vec3(0.0f, 2.0f, 10.0f));
+int currentZone = 0;
+CameraMode cameraMode = CAM_FREE;
+
+float deltaTime = 0.0f;
+float lastFrame = 0.0f;
+float lastX = SCR_WIDTH / 2.0f;
+float lastY = SCR_HEIGHT / 2.0f;
+bool firstMouse = true;
+
+float gEscala = 1.0f;
+bool  gWireframe = false;
+
+// Shaders
+Shader* phongShader = nullptr;
+Shader* cubemapShader = nullptr;
+Shader* dynamicShader = nullptr;
+Shader* fresnelShader = nullptr;
+Shader* proceduralShader = nullptr;
+Shader* wavesShader = nullptr;
+
+// Modelos
+Model* HUB_OPACO = nullptr;
+Model* INVERNADERO_OPACO = nullptr;
+Model* INVERNADERO_TRASLUCIDO = nullptr;
+Model* RECICLAJE_OPACO = nullptr;
+Model* RECICLAJE_METAL = nullptr;
+Model* ENERGIA_OPACO = nullptr;
+Model* ENERGIA_METALICO = nullptr;
+Model* CAPSULAS_OPACO = nullptr;
+AnimatedModel* PERSONAJE = nullptr;
+Model* CAJA_MODELO = nullptr;
+Model* MOON2 = nullptr;
+Model* BEBEDERO_BASE = nullptr;
+Model* BEBEDERO_AGUA = nullptr;
+
+CubeMap* mainCubeMap = nullptr;
+std::vector<Light> gLights;
+
+glm::vec4 globalAmbient = glm::vec4(0.30f, 0.30f, 0.30f, 1.0f);
+
+Player player;
+const float PLAYER_RADIUS = 0.4f;
+const float PLAYER_HEIGHT = 1.7f;
+
+Room rooms[5];
+std::vector<AABB> autoColliders[5];
+InteractiveBox interactiveBoxes[5];
+
+bool keyFLast = false;
+bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false;
+bool keyZoneLast[5] = { false, false, false, false, false };
+
+glm::mat4 baseModelMat(1.0f);
+FractalPlant* miPlantaFractal = nullptr;
+int fractalIteration = 0;
+
+bool keyPLast = false;
+bool keyOLast = false;
+
+std::vector<TrailParticle> moonTrail;
+Shader* trailShader = nullptr;
+unsigned int trailVAO = 0;
+unsigned int trailVBO = 0;
+int moonTrailMode = 0; // 0 = cyan, 1 = magenta, 2 = yellow
+float trailEmitTimer = 0.0f;
+
+// ============ MAIN ============
+int main() {
+    if (!Start()) return -1;
+    while (!glfwWindowShouldClose(window)) {
+        if (!Update()) break;
+    }
+    glfwTerminate();
+    return 0;
+}
+
+// ============ HELPERS ============
+Model* CargarModelo(const std::string& ruta) {
+    std::cout << "[Modelo] Cargando: " << ruta << " ... ";
+    Model* m = nullptr;
+    try { m = new Model(ruta); }
+    catch (...) { std::cout << "FALLO" << std::endl; return nullptr; }
+    if (!m || m->meshes.empty()) { std::cout << "FALLO" << std::endl; if (m) delete m; return nullptr; }
+    std::cout << "OK (" << m->meshes.size() << " meshes)" << std::endl;
+    return m;
+}
+
+void SetMaterial(Shader* shader, glm::vec4 ambient, glm::vec4 diffuse, glm::vec4 specular, int alpha) {
+    shader->setVec4("MaterialAmbientColor", ambient);
+    shader->setVec4("MaterialDiffuseColor", diffuse);
+    shader->setVec4("MaterialSpecularColor", specular);
+    shader->setInt("alphaIndex", alpha);
+}
+
+
+void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase) {
+    if (!modelo) return;
+    for (size_t i = 0; i < modelo->meshes.size(); i++) {
+        if (modelo->meshes[i].vertices.empty()) continue;
+        glm::vec3 minAABB = glm::vec3(FLT_MAX);
+        glm::vec3 maxAABB = glm::vec3(-FLT_MAX);
+        for (size_t j = 0; j < modelo->meshes[i].vertices.size(); j++) {
+            glm::vec4 posMundo = transformacionBase * glm::vec4(modelo->meshes[i].vertices[j].Position, 1.0f);
+            minAABB = glm::min(minAABB, glm::vec3(posMundo));
+            maxAABB = glm::max(maxAABB, glm::vec3(posMundo));
+        }
+        if (maxAABB.y < 0.2f) continue;
+        float anchoX = maxAABB.x - minAABB.x;
+        float anchoZ = maxAABB.z - minAABB.z;
+        if (anchoX > 12.0f || anchoZ > 12.0f) continue;
+        autoColliders[zoneIndex].push_back({ minAABB, maxAABB });
+    }
+}
+
+glm::vec4 GetMoonTrailBaseColor(int mode) {
+    switch (mode) {
+    case 0:
+        return glm::vec4(0.35f, 0.70f, 0.95f, 1.0f); // CYAN suave
+
+    case 1:
+        return glm::vec4(0.90f, 0.40f, 0.85f, 1.0f); // MAGENTA suave
+
+    case 2:
+        return glm::vec4(0.95f, 0.85f, 0.30f, 1.0f); // YELLOW suave
+    }
+
+    return glm::vec4(0.35f, 0.70f, 0.95f, 1.0f);
+}
+void SpawnMoonTrail(const glm::vec3& pos, const glm::vec3& dir, float t) {
+
+    glm::vec4 baseColor = GetMoonTrailBaseColor(moonTrailMode);
+
+    glm::vec3 forward = glm::normalize(dir);
+    if (glm::length(forward) < 0.0001f)
+        forward = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    glm::vec3 side = glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f));
+    if (glm::length(side) < 0.0001f)
+        side = glm::cross(forward, glm::vec3(1.0f, 0.0f, 0.0f));
+
+    side = glm::normalize(side);
+    glm::vec3 up = glm::normalize(glm::cross(side, forward));
+
+    // Más partículas, más compactas, sin efecto resorte
+    for (int i = 0; i < 70; i++) {
+
+        float r = (float)rand() / RAND_MAX;
+        float r2 = (float)rand() / RAND_MAX;
+
+        // dispersión orgánica
+        float spread = 0.18f + r * 0.75f;
+
+        float offsetSide = ((float)rand() / RAND_MAX - 0.5f) * spread;
+        float offsetUp = ((float)rand() / RAND_MAX - 0.5f) * spread;
+
+        // ligera elongación horizontal
+        offsetSide *= 1.35f;
+
+        TrailParticle p;  // <-- FALTABA ESTA LÍNEA
+
+        p.pos = pos + side * offsetSide + up * offsetUp;
+
+        float speed = 0.75f + r * 0.85f;
+
+        p.vel = -forward * speed
+            + side * ((r - 0.5f) * 0.22f)
+            + up * ((r2 - 0.5f) * 0.18f);
+
+        // Variaciones sutiles de color
+        float colorVariation = 0.82f + r * 0.25f;
+        glm::vec3 variedColor = glm::vec3(baseColor) * colorVariation;
+
+        variedColor.r += (r - 0.5f) * 0.06f;
+        variedColor.g += (r2 - 0.5f) * 0.06f;
+        variedColor.b += (r - 0.5f) * 0.04f;
+
+        variedColor = glm::clamp(variedColor, glm::vec3(0.0f), glm::vec3(1.0f));
+        p.color = glm::vec4(variedColor, 1.0f);
+
+        p.life = 0.75f + r * 0.45f;
+        p.maxLife = p.life;
+
+        p.size = 6.0f + r * 6.0f;
+
+        moonTrail.push_back(p);
+    }
+}
+void UpdateMoonTrail(float dt) {
+    for (auto& p : moonTrail) {
+        p.pos += p.vel * dt;
+        p.vel *= 0.996f;
+        p.life -= dt * 0.55f;
+        p.size *= 0.997f;
+    }
+
+    moonTrail.erase(
+        std::remove_if(
+            moonTrail.begin(),
+            moonTrail.end(),
+            [](const TrailParticle& p) { return p.life <= 0.0f; }
+        ),
+        moonTrail.end()
+    );
+
+    if (moonTrail.size() > 9000) {
+        moonTrail.erase(moonTrail.begin(), moonTrail.begin() + 1200);
+    }
+}
+
+// ============ HABITACIONES ============
+void InitRooms() {
+    rooms[0].name = "HUB";
+    rooms[0].spawnPos = glm::vec3(0.0f, 0.0f, 2.0f);
+    rooms[0].spawnYaw = 180.0f;
+    rooms[0].boundsMin = glm::vec2(-5.0f, -5.0f);
+    rooms[0].boundsMax = glm::vec2(5.0f, 5.0f);
+
+    rooms[1].name = "INVERNADERO";
+    rooms[1].spawnPos = glm::vec3(0.0f, 0.0f, -6.0f);
+    rooms[1].spawnYaw = 180.0f;
+    rooms[1].boundsMin = glm::vec2(-7.0f, -20.0f);
+    rooms[1].boundsMax = glm::vec2(7.0f, -5.0f);
+
+    rooms[2].name = "RECICLAJE";
+    rooms[2].spawnPos = glm::vec3(7.0f, 0.0f, 0.0f);
+    rooms[2].spawnYaw = 90.0f;
+    rooms[2].boundsMin = glm::vec2(6.0f, -3.5f);
+    rooms[2].boundsMax = glm::vec2(12.5f, 3.5f);
+
+    rooms[3].name = "ENERGIA";
+    rooms[3].spawnPos = glm::vec3(0.0f, 0.0f, 7.5f);
+    rooms[3].spawnYaw = 0.0f;
+    rooms[3].boundsMin = glm::vec2(-5.5f, 6.5f);
+    rooms[3].boundsMax = glm::vec2(5.5f, 13.5f);
+
+    rooms[4].name = "CAPSULAS";
+    rooms[4].spawnPos = glm::vec3(-7.0f, 0.0f, 0.0f);
+    rooms[4].spawnYaw = 270.0f;
+    rooms[4].boundsMin = glm::vec2(-15.0f, -2.5f);
+    rooms[4].boundsMax = glm::vec2(-6.5f, 2.5f);
+
+    for (int i = 0; i < 5; ++i) rooms[i].freeCamPos = glm::vec3(0.0f, 5.0f, 12.0f);
+
+    // Ubicaciones iniciales de las cajas
+    for (int i = 0; i < 5; ++i) {
+        interactiveBoxes[i].startPos = glm::vec3(6.5f + (i * 0.5f), 0.1f, (i % 2 == 0) ? -1.5f : 1.5f);
+        interactiveBoxes[i].position = interactiveBoxes[i].startPos;
+        interactiveBoxes[i].rotationY = 0.0f;
+        interactiveBoxes[i].scale = 1.0f;
+    }
+}
+
+bool CheckCollision(glm::vec3 pos, float radius, int zone) {
+    if (zone < 0 || zone >= 5) return false;
+    Room& r = rooms[zone];
+
+    if (pos.x - radius < r.boundsMin.x) return true;
+    if (pos.x + radius > r.boundsMax.x) return true;
+    if (pos.z - radius < r.boundsMin.y) return true;
+    if (pos.z + radius > r.boundsMax.y) return true;
+
+    return false;
+}
+
+void ChangeZone(int z) {
+    if (z < 0 || z >= 5) return;
+    currentZone = z;
+    player.position = rooms[z].spawnPos;
+    player.position.y = 0.0f;
+    player.yaw = rooms[z].spawnYaw;
+
+    glm::vec3 fwd(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
+    camera.Position = player.position - fwd * 1.0f + glm::vec3(0.0f, 1.7f, 0.0f);
+
+    moonTrail.clear();
+    trailEmitTimer = 0.0f;
+}
+
+// ============ START ============
+bool Start() {
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "Base Espacial - Karla Rojas", NULL, NULL);
+    if (!window) return false;
+    glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) return false;
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
+    phongShader = new Shader("shaders/11_PhongShaderMultLightsv2.vs", "shaders/11_PhongShaderMultLightsv2.fs");
+    cubemapShader = new Shader("shaders/10_vertex_cubemap.vs", "shaders/10_fragment_cubemap.fs");
+    dynamicShader = new Shader("shaders/10_vertex_skinning-IT.vs", "shaders/10_fragment_skinning-IT.fs");
+    dynamicShader->setBonesIDs(MAX_RIGGING_BONES);
+
+    fresnelShader = new Shader("shaders/11_Fresnel.vs", "shaders/11_Fresnel.fs");
+    proceduralShader = new Shader("shaders/12_ProceduralAnimation.vs", "shaders/12_ProceduralAnimation.fs");
+    wavesShader = new Shader("shaders/13_wavesAnimation.vs", "shaders/13_wavesAnimation.fs");
+    trailShader = new Shader("shaders/trail.vs", "shaders/trail.fs");
+
+    glGenVertexArrays(1, &trailVAO);
+    glGenBuffers(1, &trailVBO);
+    glBindVertexArray(trailVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 3, nullptr, GL_DYNAMIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+
+    baseModelMat = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    baseModelMat = glm::scale(baseModelMat, glm::vec3(gEscala));
+
+    HUB_OPACO = CargarModelo("models/HUB_OPACO.fbx");
+    INVERNADERO_OPACO = CargarModelo("models/INVERNADERO_OPACO.fbx");
+    INVERNADERO_TRASLUCIDO = CargarModelo("models/INVERNADERO_TRASLUCIDO.fbx");
+    RECICLAJE_OPACO = CargarModelo("models/RECICLAJE_OPACO.fbx");
+    RECICLAJE_METAL = CargarModelo("models/RECICLAJE_METAL.fbx");
+    ENERGIA_OPACO = CargarModelo("models/ENERGIA_OPACO.fbx");
+    ENERGIA_METALICO = CargarModelo("models/ENERGIA_METALICO.fbx");
+    CAPSULAS_OPACO = CargarModelo("models/CAPSULAS_OPACO.fbx");
+    CAJA_MODELO = CargarModelo("models/CAJA_INTERACTIVA.fbx");
+    MOON2 = CargarModelo("models/moon2.fbx");
+    BEBEDERO_BASE = CargarModelo("models/bebedero.fbx");
+    BEBEDERO_AGUA = CargarModelo("models/bebedero_agua.fbx");
+
+    GenerarColisionesDeModelo(HUB_OPACO, 0, baseModelMat);
+    GenerarColisionesDeModelo(INVERNADERO_OPACO, 1, baseModelMat);
+    GenerarColisionesDeModelo(RECICLAJE_OPACO, 2, baseModelMat);
+    GenerarColisionesDeModelo(RECICLAJE_METAL, 2, baseModelMat);
+    GenerarColisionesDeModelo(ENERGIA_OPACO, 3, baseModelMat);
+    GenerarColisionesDeModelo(ENERGIA_METALICO, 3, baseModelMat);
+    GenerarColisionesDeModelo(CAPSULAS_OPACO, 4, baseModelMat);
+
+    try { PERSONAJE = new AnimatedModel("models/personaje.fbx", 0); }
+    catch (...) { PERSONAJE = nullptr; }
+
+    InitRooms();
+    ChangeZone(0);
+
+    std::vector<std::string> faces{
+        "textures/cubemap/01/posx.jpg", "textures/cubemap/01/negx.jpg",
+        "textures/cubemap/01/posy.jpg", "textures/cubemap/01/negy.jpg",
+        "textures/cubemap/01/posz.jpg", "textures/cubemap/01/negz.jpg"
+    };
+    mainCubeMap = new CubeMap();
+    mainCubeMap->loadCubemap(faces);
+
+    // === LUCES ===
+    gLights.clear();
+
+    // [0] Luz principal de la habitacion
+    Light roomLight;
+    roomLight.type = 0;
+    roomLight.Position = glm::vec3(0.0f, 4.0f, 0.0f);
+    roomLight.Color = glm::vec4(1.0f, 0.98f, 0.92f, 1.0f);
+    roomLight.Power = glm::vec4(5.0f);
+    roomLight.alphaIndex = 16;
+    roomLight.distance = 12.0f;
+    gLights.push_back(roomLight);
+
+    // [1] Linterna del jugador
+    Light playerLight;
+    playerLight.type = 0;
+    playerLight.Position = glm::vec3(0.0f, 2.0f, 0.0f);
+    playerLight.Color = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    playerLight.Power = glm::vec4(0.3f);
+    playerLight.alphaIndex = 64;
+    playerLight.distance = 2.0f;
+    gLights.push_back(playerLight);
+
+    // [2] Luz INTERMITENTE del nucleo del reactor
+    Light reactorLight;
+    reactorLight.type = 0;
+    reactorLight.Position = glm::vec3(0.0f, 2.25f, 10.0f);
+    reactorLight.Color = glm::vec4(0.35f, 0.85f, 1.0f, 1.0f);
+    reactorLight.Power = glm::vec4(0.0f);
+    reactorLight.alphaIndex = 32;
+    reactorLight.distance = 9.0f;
+    gLights.push_back(reactorLight);
+
+    // [3] Luz Extra 1 (Cpsulas)
+    Light capsulaLight1;
+    capsulaLight1.type = 0;
+    capsulaLight1.Position = glm::vec3(0.0f);
+    capsulaLight1.Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+    capsulaLight1.Power = glm::vec4(0.0f);
+    capsulaLight1.alphaIndex = 16;
+    capsulaLight1.distance = 8.0f;
+    gLights.push_back(capsulaLight1);
+
+    // [4] Luz Extra 2 (Cpsulas)
+    Light capsulaLight2 = capsulaLight1;
+    gLights.push_back(capsulaLight2);
+
+    miPlantaFractal = new FractalPlant();
+    miPlantaFractal->Generate(0);
+
+    return true;
+}
+
+// ============ CAMARA ============
+glm::mat4 ComputeView() {
+    if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
+    glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
+    glm::vec3 eye, target;
+    const float headHeight = 1.7f, distBack = 4.5f, distFront = 4.5f, camHeight = 2.8f;
+    switch (cameraMode) {
+    case CAM_FIRST:  eye = player.position + glm::vec3(0.0f, headHeight, 0.0f); target = eye + fwd; break;
+    case CAM_THIRD:  eye = player.position - fwd * distBack + glm::vec3(0.0f, camHeight, 0.0f); target = player.position + glm::vec3(0.0f, 1.2f, 0.0f); break;
+    case CAM_SECOND: eye = player.position + fwd * distFront + glm::vec3(0.0f, camHeight, 0.0f); target = player.position + glm::vec3(0.0f, 1.2f, 0.0f); break;
+    default: return camera.GetViewMatrix();
+    }
+    return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
+}
+
+glm::vec3 ComputeEyePos() {
+    if (cameraMode == CAM_FREE) return camera.Position;
+    glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
+    if (cameraMode == CAM_FIRST)  return player.position + glm::vec3(0, 1.7f, 0);
+    if (cameraMode == CAM_THIRD)  return player.position - fwd * 4.5f + glm::vec3(0, 2.8f, 0);
+    if (cameraMode == CAM_SECOND) return player.position + fwd * 4.5f + glm::vec3(0, 2.8f, 0);
+    return camera.Position;
+}
+
+// ============ UPDATE PERSONAJE ============
+void UpdateCharacter(float dt) {
+    if (!PERSONAJE) return;
+    player.isWalking = false;
+    glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
+    glm::vec3 movement(0.0f);
+
+    if (glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS) { movement += fwd * player.walkSpeed * dt; player.isWalking = true; }
+    if (glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS) { movement -= fwd * player.walkSpeed * dt; player.isWalking = true; }
+    if (glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
+    if (glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+
+    glm::vec3 newPos = player.position + movement;
+    glm::vec3 testX(newPos.x, 0.0f, player.position.z);
+    if (!CheckCollision(testX, PLAYER_RADIUS, currentZone)) player.position.x = newPos.x;
+
+    glm::vec3 testZ(player.position.x, 0.0f, newPos.z);
+    if (!CheckCollision(testZ, PLAYER_RADIUS, currentZone)) player.position.z = newPos.z;
+
+    player.position.y = 0.0f;
+    PERSONAJE->UpdateAnimation(dt);
+}
+
+void DrawCharacter(const glm::mat4& projection, const glm::mat4& view) {
+    if (!PERSONAJE) return;
+    if (cameraMode == CAM_FIRST) return;
+
+    dynamicShader->use();
+    dynamicShader->setMat4("projection", projection);
+    dynamicShader->setMat4("view", view);
+    dynamicShader->setVec3("EyeDirection_cameraspace", ComputeEyePos());
+
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, player.position);
+    m = glm::rotate(m, glm::radians(player.yaw), glm::vec3(0.0f, 1.0f, 0.0f));
+    m = glm::scale(m, glm::vec3(0.01f));
+    dynamicShader->setMat4("model", m);
+
+    for (unsigned int i = 0; i < PERSONAJE->m_NumBones; i++) {
+        dynamicShader->SetBoneTransform(i, PERSONAJE->gBones[i]);
+    }
+    PERSONAJE->Draw(*dynamicShader);
+}
+
+// ============ UPDATE PRINCIPAL ============
+bool Update() {
+    float currentFrame = (float)glfwGetTime();
+    deltaTime = currentFrame - lastFrame;
+    lastFrame = currentFrame;
+    float t = currentFrame;
+
+    processInput(window);
+    UpdateCharacter(deltaTime);
+
+    // Resetear luces extras por defecto
+    if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
+    if (gLights.size() > 3) gLights[3].Power = glm::vec4(0.0f);
+    if (gLights.size() > 4) gLights[4].Power = glm::vec4(0.0f);
+
+    if (gLights.size() > 0) {
+        switch (currentZone) {
+        case 0: // HUB
+            gLights[0].Position = glm::vec3(0.0f, 2.7f, 0.0f);
+            gLights[0].Color = glm::vec4(1.0f, 0.98f, 0.92f, 1.0f);
+            gLights[0].Power = glm::vec4(3.0f);
+            gLights[0].distance = 15.0f;
+            break;
+
+        case 1: // INVERNADERO
+            gLights[0].Position = glm::vec3(0.0f, 7.5f, -12.5f);
+            gLights[0].Color = glm::vec4(0.75f, 1.0f, 0.75f, 1.0f);
+            gLights[0].Power = glm::vec4(11.0f);
+            gLights[0].distance = 40.0f;
+            break;
+
+        case 2: // RECICLAJE
+            gLights[0].Position = glm::vec3(9.3f, 4.0f, 0.0f);
+            gLights[0].Color = glm::vec4(0.65f, 0.8f, 1.0f, 1.0f);
+            gLights[0].Power = glm::vec4(6.0f);
+            gLights[0].distance = 15.0f;
+            break;
+
+        case 3: // ENERGIA
+            gLights[0].Position = glm::vec3(0.0f, 4.0f, 10.0f);
+            gLights[0].Color = glm::vec4(1.0f, 0.55f, 0.25f, 1.0f);
+            gLights[0].Power = glm::vec4(7.0f);
+            gLights[0].distance = 16.0f;
+
+            if (gLights.size() > 2) {
+                float fastBlink = (sinf(t * 11.0f) > 0.0f) ? 1.0f : 0.15f;
+                float slowPulse = 0.6f + 0.4f * sinf(t * 2.3f);
+                float power = 14.0f * fastBlink * slowPulse;
+
+                float warm = 0.5f + 0.5f * sinf(t * 1.7f);
+                glm::vec4 col = glm::mix(
+                    glm::vec4(0.30f, 0.85f, 1.00f, 1.0f),
+                    glm::vec4(0.85f, 0.95f, 1.00f, 1.0f),
+                    warm
+                );
+
+                gLights[2].Position = glm::vec3(0.0f, 2.25f, 10.0f);
+                gLights[2].Color = col;
+                gLights[2].Power = glm::vec4(power);
+                gLights[2].distance = 9.0f;
+            }
+            break;
+
+        case 4: // CAPSULAS (3 Luces en el pasillo)
+            // Luz Central
+            gLights[0].Position = glm::vec3(-10.75f, 4.5f, 0.0f);
+            gLights[0].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+            gLights[0].Power = glm::vec4(4.0f);
+            gLights[0].distance = 10.0f;
+
+            // Luz Este (Entrada)
+            if (gLights.size() > 3) {
+                gLights[3].Position = glm::vec3(-7.5f, 4.5f, 0.0f);
+                gLights[3].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+                gLights[3].Power = glm::vec4(4.0f);
+                gLights[3].distance = 10.0f;
+            }
+
+            // Luz Oeste (Fondo)
+            if (gLights.size() > 4) {
+                gLights[4].Position = glm::vec3(-14.0f, 4.5f, 0.0f);
+                gLights[4].Color = glm::vec4(0.92f, 0.95f, 1.0f, 1.0f);
+                gLights[4].Power = glm::vec4(4.0f);
+                gLights[4].distance = 10.0f;
+            }
+            break;
+        }
+    }
+
+    if (gLights.size() > 1) gLights[1].Position = player.position + glm::vec3(0.0f, 2.2f, 0.0f);
+
+    glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glPolygonMode(GL_FRONT_AND_BACK, gWireframe ? GL_LINE : GL_FILL);
+
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
+    glm::mat4 view = ComputeView();
+    glm::vec3 eyePos = ComputeEyePos();
+
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+    phongShader->setVec3("eye", eyePos);
+    phongShader->setVec4("globalAmbient", globalAmbient);
+    SetLightUniforms(phongShader);
+
+    phongShader->setMat4("model", baseModelMat);
+    phongShader->setFloat("transparency", 1.0f);
+
+    glm::vec4 ambOpaque = glm::vec4(0.20f, 0.20f, 0.20f, 1.0f);
+    glm::vec4 diffOpaque = glm::vec4(1.00f, 1.00f, 1.00f, 1.0f);
+    glm::vec4 specOpaque = glm::vec4(0.40f, 0.40f, 0.40f, 1.0f);
+    int alphaOpaque = 32;
+
+
+    glm::vec4 ambMetal = glm::vec4(0.03f, 0.03f, 0.03f, 1.0f);
+    glm::vec4 diffMetal = glm::vec4(0.45f, 0.45f, 0.48f, 1.0f);
+    glm::vec4 specMetal = glm::vec4(12.0f, 12.0f, 12.0f, 1.0f);
+    int alphaMetal = 2048;
+
+
+    switch (currentZone) {
+    case 0: // HUB
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        if (HUB_OPACO) HUB_OPACO->Draw(*phongShader);
+        break;
+
+    case 1: // INVERNADERO
+        mainCubeMap->drawCubeMap(*cubemapShader, projection, view);
+
+        phongShader->use();
+        phongShader->setMat4("projection", projection);
+        phongShader->setMat4("view", view);
+        phongShader->setMat4("model", baseModelMat);
+        phongShader->setVec3("eye", eyePos);
+        SetLightUniforms(phongShader);
+
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        if (INVERNADERO_OPACO) INVERNADERO_OPACO->Draw(*phongShader);
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        fresnelShader->use();
+        fresnelShader->setMat4("projection", projection);
+        fresnelShader->setMat4("view", view);
+        fresnelShader->setMat4("model", baseModelMat);
+        fresnelShader->setVec3("cameraPos", eyePos);
+        fresnelShader->setVec3("baseColor", glm::vec3(0.30f, 0.55f, 0.70f));
+        fresnelShader->setFloat("transparency", 0.35f);
+        fresnelShader->setFloat("alphaMult", 0.35f);
+        fresnelShader->setFloat("opacity", 0.35f);
+        if (INVERNADERO_TRASLUCIDO) INVERNADERO_TRASLUCIDO->Draw(*fresnelShader);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+
+        // ---- ESTELA DEL COMETA (más visible) ----
+        if (MOON2 && proceduralShader) {
+            proceduralShader->use();
+            proceduralShader->setMat4("projection", projection);
+            proceduralShader->setMat4("view", view);
+
+            glm::mat4 moonMat(1.0f);
+            moonMat = glm::translate(moonMat, glm::vec3(0.0f, 11.0f, -12.5f));
+            moonMat = glm::rotate(moonMat, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            moonMat = glm::scale(moonMat, glm::vec3(0.5f));
+            proceduralShader->setMat4("model", moonMat);
+
+            float moonTime = t * 0.3f;
+            float moonRadius = 15.0f;
+            float moonHeight = 0.0f;
+
+            proceduralShader->setFloat("time", moonTime);
+            proceduralShader->setFloat("radius", moonRadius);
+            proceduralShader->setFloat("height", moonHeight);
+
+            MOON2->Draw(*proceduralShader);
+
+            // Posición del cometa en el mundo
+            glm::vec3 moonLocalPos(
+                moonRadius * cosf(moonTime),
+                moonRadius * sinf(moonTime),
+                moonHeight
+            );
+            glm::vec3 moonWorldPos = glm::vec3(moonMat * glm::vec4(moonLocalPos, 1.0f));
+
+            glm::vec3 moonLocalDir(
+                -moonRadius * sinf(moonTime),
+                moonRadius * cosf(moonTime),
+                0.0f
+            );
+            glm::vec3 moonWorldDir = glm::vec3(moonMat * glm::vec4(moonLocalDir, 0.0f));
+            if (glm::length(moonWorldDir) > 0.0001f) moonWorldDir = glm::normalize(moonWorldDir);
+            else moonWorldDir = glm::vec3(0.0f, 1.0f, 0.0f);
+
+            trailEmitTimer += deltaTime;
+
+            if (trailEmitTimer >= 0.002f){
+                trailEmitTimer = 0.0f;
+                SpawnMoonTrail(moonWorldPos, moonWorldDir, t);
+            }
+
+            UpdateMoonTrail(deltaTime);
+
+            if (trailShader && !moonTrail.empty()) {
+                trailShader->use();
+                trailShader->setMat4("projection", projection);
+                trailShader->setMat4("view", view);
+
+                glDisable(GL_DEPTH_TEST);      // clave para que no se oculte
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+
+                glBindVertexArray(trailVAO);
+
+                for (const auto& p : moonTrail) {
+                    float k = glm::clamp(p.life / p.maxLife, 0.0f, 1.0f);
+
+                    glm::vec4 c = p.color;
+                    c.a = k * 1.0f;
+
+                    trailShader->setVec4("particleColor", c);
+                    trailShader->setFloat(
+                        "particleSize",
+                        p.size * (0.55f + 0.35f * k)
+                    );
+
+                    float pos[3] = { p.pos.x, p.pos.y, p.pos.z };
+                    glBindBuffer(GL_ARRAY_BUFFER, trailVBO);
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(pos), pos);
+
+                    glDrawArrays(GL_POINTS, 0, 1);
+                }
+
+                glBindVertexArray(0);
+
+                glEnable(GL_DEPTH_TEST);
+
+                glDepthMask(GL_TRUE);
+
+                glDisable(GL_BLEND);
+
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+        }
+
+        phongShader->use();
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        glm::mat4 bebederoMat(1.0f);
+        bebederoMat = glm::translate(bebederoMat, glm::vec3(5.0f, 0.2f, -10.1f));
+        bebederoMat = glm::rotate(bebederoMat, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        bebederoMat = glm::scale(bebederoMat, glm::vec3(gEscala));
+        phongShader->setMat4("model", bebederoMat);
+        if (BEBEDERO_BASE) BEBEDERO_BASE->Draw(*phongShader);
+
+        if (BEBEDERO_AGUA && wavesShader) {
+            wavesShader->use();
+            wavesShader->setMat4("projection", projection);
+            wavesShader->setMat4("view", view);
+            wavesShader->setMat4("model", bebederoMat);
+            wavesShader->setFloat("time", t);
+            BEBEDERO_AGUA->Draw(*wavesShader);
+        }
+
+        // ====== PLANTA FRACTAL (HELECHO) ======
+        if (fractalIteration > 0 && miPlantaFractal) {
+            phongShader->use();
+
+            glm::vec4 ambPlanta = glm::vec4(0.05f, 0.4f, 0.05f, 1.0f);
+            glm::vec4 diffPlanta = glm::vec4(0.1f, 0.8f, 0.1f, 1.0f);
+            glm::vec4 specPlanta = glm::vec4(0.1f, 0.1f, 0.1f, 1.0f);
+            SetMaterial(phongShader, ambPlanta, diffPlanta, specPlanta, alphaOpaque);
+
+            glm::mat4 plantMat(1.0f);
+            plantMat = glm::translate(plantMat, glm::vec3(2.1f, 0.5f, -10.1f));
+            plantMat = glm::scale(plantMat, glm::vec3(0.4f));
+
+            glLineWidth(4.0f);
+            miPlantaFractal->Draw(*phongShader, plantMat);
+            glLineWidth(1.0f);
+        }
+        break;
+
+    case 2: // RECICLAJE
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        if (RECICLAJE_OPACO) RECICLAJE_OPACO->Draw(*phongShader);
+        SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
+        if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
+
+        // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
+        if (CAJA_MODELO) {
+            SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+            for (int i = 0; i < 5; i++) {
+                glm::mat4 m(1.0f);
+                m = glm::translate(m, interactiveBoxes[i].position);
+                m = glm::rotate(m, interactiveBoxes[i].rotationY, glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                // Escala base ajustada a 0.5f, multiplicada por su escala interactiva
+                m = glm::scale(m, glm::vec3(0.5f * interactiveBoxes[i].scale));
+
+                phongShader->setMat4("model", m);
+                CAJA_MODELO->Draw(*phongShader);
+            }
+        }
+        break;
+
+    case 3: // ENERGIA
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        if (ENERGIA_OPACO) ENERGIA_OPACO->Draw(*phongShader);
+        SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
+        if (ENERGIA_METALICO) ENERGIA_METALICO->Draw(*phongShader);
+        break;
+
+    case 4: // CAPSULAS
+        SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
+        if (CAPSULAS_OPACO) CAPSULAS_OPACO->Draw(*phongShader);
+        break;
+    }
+
+    DrawCharacter(projection, view);
+
+    glfwSwapBuffers(window);
+    glfwPollEvents();
+    return true;
+}
+
+// ============ INPUT & CONTROLES ============
+void processInput(GLFWwindow* window) {
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+
+    // 1. Controles universales: Cámara Libre
+    if (cameraMode == CAM_FREE) {
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) camera.ProcessKeyboard(FORWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) camera.ProcessKeyboard(BACKWARD, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) camera.ProcessKeyboard(LEFT, deltaTime);
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) camera.ProcessKeyboard(RIGHT, deltaTime);
+    }
+
+    // 2. Controles universales: Cambio de Cámaras
+    bool f1 = glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS;
+    bool f2 = glfwGetKey(window, GLFW_KEY_F2) == GLFW_PRESS;
+    bool f3 = glfwGetKey(window, GLFW_KEY_F3) == GLFW_PRESS;
+    bool f4 = glfwGetKey(window, GLFW_KEY_F4) == GLFW_PRESS;
+
+    if (f1 && !keyF1Last) cameraMode = CAM_FREE;
+    if (f2 && !keyF2Last) cameraMode = CAM_FIRST;
+    if (f3 && !keyF3Last) cameraMode = CAM_SECOND;
+    if (f4 && !keyF4Last) cameraMode = CAM_THIRD;
+
+    keyF1Last = f1;
+    keyF2Last = f2;
+    keyF3Last = f3;
+    keyF4Last = f4;
+
+    // 3. Controles universales: Teletransporte a Zonas
+    int zoneKeys[5] = { GLFW_KEY_0,    GLFW_KEY_1,    GLFW_KEY_2,    GLFW_KEY_3,    GLFW_KEY_4 };
+    int zoneKeysKP[5] = { GLFW_KEY_KP_0, GLFW_KEY_KP_1, GLFW_KEY_KP_2, GLFW_KEY_KP_3, GLFW_KEY_KP_4 };
+
+    for (int i = 0; i < 5; ++i) {
+        bool now = (glfwGetKey(window, zoneKeys[i]) == GLFW_PRESS) ||
+            (glfwGetKey(window, zoneKeysKP[i]) == GLFW_PRESS);
+
+        if (now && !keyZoneLast[i]) ChangeZone(i);
+        keyZoneLast[i] = now;
+    }
+
+    // ==========================================
+    // CONTROLES ESTRICTOS POR ZONA
+    // ==========================================
+
+    // ZONA 1: INVERNADERO
+    // Controles del helecho + C/M/Y para el cometa moon2
+    if (currentZone == 1) {
+        bool pPressed = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
+        if (pPressed && !keyPLast) {
+            if (fractalIteration < 7) {
+                fractalIteration++;
+                miPlantaFractal->Generate(fractalIteration);
+                std::cout << "Iteracion de helecho: " << fractalIteration << std::endl;
+            }
+        }
+        keyPLast = pPressed;
+
+        bool oPressed = glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS;
+        if (oPressed && !keyOLast) {
+            fractalIteration = 0;
+            miPlantaFractal->Generate(fractalIteration);
+            std::cout << "Helecho reseteado a iteracion 0" << std::endl;
+        }
+        keyOLast = oPressed;
+
+        // Colores del cometa SOLO en invernadero
+        static bool cLast = false;
+        static bool mLast = false;
+        static bool yLast = false;
+
+        bool cKey = glfwGetKey(window, GLFW_KEY_C) == GLFW_PRESS;
+        bool mKey = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
+        bool yKey = glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS;
+
+        if (cKey && !cLast) {
+            moonTrailMode = 0; // cyan
+            std::cout << "CYAN" << std::endl;
+        }
+        if (mKey && !mLast) {
+            moonTrailMode = 1; // magenta
+            std::cout << "MAGENTA" << std::endl;
+        }
+        if (yKey && !yLast) {
+            moonTrailMode = 2; // yellow
+            std::cout << "YELLOW" << std::endl;
+        }
+
+        cLast = cKey;
+        mLast = mKey;
+        yLast = yKey;
+    }
+    else {
+        keyPLast = false;
+        keyOLast = false;
+    }
+
+    // ZONA 2: RECICLAJE
+    // Controles directos e individuales de cada caja
+    if (currentZone == 2) {
+        float boxSpeed = 2.5f * deltaTime;
+
+        // Caja 0: SOLO ROTA EN Y (Teclas O / L)
+        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) interactiveBoxes[0].rotationY -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) interactiveBoxes[0].rotationY += boxSpeed;
+
+        // Caja 1: SOLO SE MUEVE EN Y (Teclas U / J)
+        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) interactiveBoxes[1].position.y += boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) interactiveBoxes[1].position.y -= boxSpeed;
+        if (interactiveBoxes[1].position.y < 0.0f) interactiveBoxes[1].position.y = 0.0f;
+        if (interactiveBoxes[1].position.y > 3.0f) interactiveBoxes[1].position.y = 3.0f;
+
+        // Caja 2: SOLO SE MUEVE EN X (Teclas Y / H)
+        if (glfwGetKey(window, GLFW_KEY_Y) == GLFW_PRESS) interactiveBoxes[2].position.x -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS) interactiveBoxes[2].position.x += boxSpeed;
+
+        // Caja 3: SOLO SE MUEVE EN Z (Teclas I / K)
+        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) interactiveBoxes[3].position.z -= boxSpeed;
+        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) interactiveBoxes[3].position.z += boxSpeed;
+
+        // Caja 4: Escala
+        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS)
+            interactiveBoxes[4].scale -= 1.0f * deltaTime;
+        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS)
+            interactiveBoxes[4].scale += 1.0f * deltaTime;
+
+        // Resetear todas las cajas
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
+            for (int i = 0; i < 5; ++i) {
+                interactiveBoxes[i].position = interactiveBoxes[i].startPos;
+                interactiveBoxes[i].rotationY = 0.0f;
+                interactiveBoxes[i].scale = 1.0f;
+            }
+        }
+    }
+}
+
+void SetLightUniforms(Shader* shader) {
+    shader->setInt("numLights", (int)gLights.size());
+    for (size_t i = 0; i < gLights.size(); ++i) {
+        std::ostringstream ss; ss << "allLights[" << i << "].";
+        shader->setVec3((ss.str() + "Position").c_str(), gLights[i].Position);
+        shader->setVec3((ss.str() + "Direction").c_str(), gLights[i].Direction);
+        shader->setVec4((ss.str() + "Color").c_str(), gLights[i].Color);
+        shader->setVec4((ss.str() + "Power").c_str(), gLights[i].Power);
+        shader->setInt((ss.str() + "alphaIndex").c_str(), gLights[i].alphaIndex);
+        float d = (gLights[i].distance > 0.0001f) ? gLights[i].distance : 1.0f;
+        shader->setFloat((ss.str() + "distance").c_str(), d);
+        shader->setInt((ss.str() + "type").c_str(), gLights[i].type);
+    }
+}
+
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) { glViewport(0, 0, width, height); }
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    if (firstMouse) { lastX = (float)xpos; lastY = (float)ypos; firstMouse = false; }
+    float xoffset = (float)xpos - lastX; float yoffset = lastY - (float)ypos;
+    lastX = (float)xpos; lastY = (float)ypos;
+    if (cameraMode == CAM_FREE) camera.ProcessMouseMovement(xoffset, yoffset);
+}
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    if (cameraMode == CAM_FREE) camera.ProcessMouseScroll((float)yoffset);
+}
