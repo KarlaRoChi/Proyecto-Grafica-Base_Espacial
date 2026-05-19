@@ -260,7 +260,10 @@ Camera camera(glm::vec3(0.0f, 2.0f, 10.0f));
 int currentZone = 0;
 // Arrancamos en tercera persona para que WASD mueva al personaje desde el
 // primer frame (CAM_FREE bloqueaba el movimiento del avatar hasta F1/F2/F3).
-CameraMode cameraMode = CAM_THIRD;
+// Arrancamos en primera persona para que el jugador entre inmediatamente en
+// la perspectiva del astronauta. F1/F2/F3 alternan entre 1ra/2da/3ra y F8
+// libera la camara orbital.
+CameraMode cameraMode = CAM_FIRST;
 
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
@@ -329,6 +332,17 @@ const float COOKING_DURATION = 3.0f;
 // mover la ventana, alt-tabear o hacer una captura de pantalla. Cuando esta
 // liberado mouse_callback no rota la camara y el cursor se ve.
 bool gCursorReleased = false;
+
+// Panel de instrucciones: por defecto se muestra "compacto" (solo 2-3 lineas
+// basicas) y la tecla H lo expande con la lista completa.
+bool gHelpExpanded = false;
+
+// Input direccional del jugador en el frame actual (WASD). Lo lee el HUD
+// para dibujar el joystick virtual que refleja por donde se esta moviendo.
+// Componentes en [-1,1]: x = lateral (A negativo / D positivo aunque A/D
+// rotan, lo usamos como giro visual), y = forward (S negativo / W positivo).
+glm::vec2 gMoveInput = glm::vec2(0.0f);
+bool      gIsSprinting = false;
 
 // Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
 std::string gZoneBanner;
@@ -890,10 +904,13 @@ void InitDoors() {
     zoneDoors[3] = { glm::vec3(-4.5f, 0.0f,  0.0f), 0.9f, 0, 4 };
 
     // ---- 4 puertas de retorno al HUB desde cada zona ----
-    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.5f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
-    zoneDoors[5] = { glm::vec3( 6.5f, 0.0f,  0.0f), 0.9f, 2, 0 }; // RECICLAJE -> HUB
-    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  7.0f), 0.9f, 3, 0 }; // ENERGIA -> HUB
-    zoneDoors[7] = { glm::vec3(-7.0f, 0.0f,  0.0f), 0.9f, 4, 0 }; // CAPSULAS -> HUB
+    // Las pegamos casi a ras de la pared interna de cada modulo para que el
+    // jugador no se quede atrapado caminando hacia ella; antes estaban ~0.5 m
+    // separadas y se veian flotando dentro de la habitacion.
+    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.15f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
+    zoneDoors[5] = { glm::vec3( 6.15f, 0.0f, 0.0f),  0.9f, 2, 0 }; // RECICLAJE -> HUB
+    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  6.65f), 0.9f, 3, 0 }; // ENERGIA -> HUB
+    zoneDoors[7] = { glm::vec3(-6.65f, 0.0f, 0.0f),  0.9f, 4, 0 }; // CAPSULAS -> HUB
 }
 
 static bool PlayerInsideDoor(const ZoneDoor& d) {
@@ -1379,10 +1396,15 @@ void UpdateCharacter(float dt) {
                       (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
         float speed = player.walkSpeed * (sprint ? player.sprintMult : 1.0f);
 
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * speed * dt; player.isWalking = true; }
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * speed * dt; player.isWalking = true; }
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+        glm::vec2 in(0.0f);
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * speed * dt; player.isWalking = true; in.y += 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * speed * dt; player.isWalking = true; in.y -= 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; in.x -= 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; in.x += 1.0f; }
+        // Lerp suave del joystick hacia el input para que el puntito no
+        // brinque, y vuelva al centro al soltar.
+        gMoveInput   = gMoveInput * 0.7f + in * 0.3f;
+        gIsSprinting = sprint && player.isWalking;
 
         player.isSprinting = sprint && player.isWalking;
 
@@ -2155,6 +2177,87 @@ static void WorldToMap(float wx, float wz, float mapX, float mapY,
     outY = mapY + (1.0f - v) * mapH;
 }
 
+// Joystick virtual: circulo grande (base) + punto interior (stick) que se
+// desplaza segun gMoveInput. Encima muestra etiqueta de SPRINT cuando se
+// corre. Se dibuja como cuadrados aproximando un anillo (no tenemos primitive
+// para circulos, asi que dibujamos 24 segmentos radiales). Pequenio,
+// abajo-izquierda, justo debajo del panel de instrucciones.
+void DrawJoystick() {
+    if (!gText || !gText->ready) return;
+
+    const float r = 38.0f;                   // radio del aro exterior
+    // Esquina inferior derecha, ARRIBA del bloque de barras (las barras
+    // ocupan ~y=18..110). Subimos el joystick a y=180 para que no se
+    // empalme. El minimapa esta en la parte superior-derecha, asi que el
+    // joystick queda en el hueco vertical libre del lado derecho.
+    const float cx = SCR_WIDTH - 80.0f;
+    const float cy = 195.0f;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Fondo cuadrado tras el joystick (panel oscuro con bracket).
+    float pad = 14.0f;
+    float bx = cx - r - pad, by = cy - r - pad;
+    float bw = (r + pad) * 2.0f, bh = (r + pad) * 2.0f + 14.0f;
+    DrawQuad2D(bx + 3.0f, by - 3.0f, bw, bh, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+    DrawQuad2D(bx, by, bw, bh, glm::vec4(0.05f, 0.10f, 0.18f, 0.82f));
+    DrawQuad2D(bx, by + bh - 3.0f, bw, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(bx, by, bw, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+
+    // Aro circular aproximado con 36 quads tangenciales (tickmarks).
+    const int NSEG = 36;
+    for (int i = 0; i < NSEG; ++i) {
+        float a = (float)i / NSEG * 6.2831853f;
+        float px = cx + cosf(a) * r;
+        float py = cy + sinf(a) * r;
+        float alpha = (i % 9 == 0) ? 1.0f : 0.55f;
+        glm::vec4 col(0.55f, 0.75f, 1.0f, alpha);
+        DrawQuad2D(px - 1.5f, py - 1.5f, 3.0f, 3.0f, col);
+    }
+    // Cruz interior tenue (referencia de centro).
+    DrawQuad2D(cx - r + 4.0f, cy - 0.5f, (r * 2.0f) - 8.0f, 1.0f,
+               glm::vec4(0.55f, 0.75f, 1.0f, 0.20f));
+    DrawQuad2D(cx - 0.5f, cy - r + 4.0f, 1.0f, (r * 2.0f) - 8.0f,
+               glm::vec4(0.55f, 0.75f, 1.0f, 0.20f));
+
+    // Etiquetas W/A/S/D alrededor del aro.
+    gText->RenderText("W", cx - 6.0f,  cy + r - 2.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("S", cx - 6.0f,  cy - r - 14.0f, 0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("A", cx - r - 14.0f, cy - 8.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("D", cx + r + 4.0f,  cy - 8.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+
+    // Stick (punto interior). Mapea gMoveInput.x al desplazamiento horizontal
+    // y gMoveInput.y al vertical (positivo Y = arriba = W).
+    float sx = cx + glm::clamp(gMoveInput.x, -1.0f, 1.0f) * (r * 0.65f);
+    float sy = cy + glm::clamp(gMoveInput.y, -1.0f, 1.0f) * (r * 0.65f);
+    float stickR = gIsSprinting ? 9.0f : 7.0f;
+    // Halo
+    glm::vec4 halo = gIsSprinting
+        ? glm::vec4(1.0f, 0.65f, 0.20f, 0.45f)
+        : glm::vec4(0.40f, 0.80f, 1.0f, 0.35f);
+    DrawQuad2D(sx - stickR - 3.0f, sy - stickR - 3.0f,
+               (stickR + 3.0f) * 2.0f, (stickR + 3.0f) * 2.0f, halo);
+    // Cuerpo del stick
+    glm::vec4 body = gIsSprinting
+        ? glm::vec4(1.0f, 0.78f, 0.30f, 1.0f)
+        : glm::vec4(0.65f, 0.95f, 1.0f, 1.0f);
+    DrawQuad2D(sx - stickR, sy - stickR, stickR * 2.0f, stickR * 2.0f, body);
+    // Reflejo
+    DrawQuad2D(sx - stickR + 2.0f, sy + stickR - 4.0f, stickR, 2.0f,
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.7f));
+
+    // Pie con estado: caminando / corriendo / quieto.
+    const char* state = "QUIETO";
+    glm::vec3 stateCol(0.70f, 0.78f, 0.92f);
+    if (gIsSprinting) { state = "SPRINT"; stateCol = glm::vec3(1.0f, 0.78f, 0.30f); }
+    else if (glm::length(gMoveInput) > 0.1f) { state = "CAMINA"; stateCol = glm::vec3(0.65f, 0.95f, 1.0f); }
+    gText->RenderText(state, bx + (bw - 50.0f) * 0.5f, by + 6.0f, 0.36f, stateCol);
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawMinimap() {
     if (!showMinimap) return;
     glDisable(GL_DEPTH_TEST);
@@ -2342,9 +2445,28 @@ static std::vector<std::string> BuildHelpLines() {
     return out;
 }
 
+// Pistas minimas siempre visibles cuando el panel esta colapsado. Son las
+// teclas esenciales para no quedar atrapado y reciben adaptaciones por zona.
+static std::vector<std::string> BuildCompactHelpLines() {
+    std::vector<std::string> out;
+    out.push_back("WASD mover  |  Shift correr  |  Espacio saltar  |  ESC menu");
+    const char* zoneHint = "";
+    switch (currentZone) {
+        case 0: zoneHint = "HUB: camina a una puerta dorada para entrar a un modulo";          break;
+        case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
+        case 2: zoneHint = "RECICLAJE: B inicia  |  F clasifica el item mas cercano";          break;
+        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Z X C V = botones del patron";         break;
+        case 4: zoneHint = "CAPSULAS: B prepara comida (necesita plantas regadas)";            break;
+    }
+    out.push_back(zoneHint);
+    out.push_back("Q manual de tareas  |  H expandir ayuda  |  ALT libera mouse");
+    return out;
+}
+
 void DrawInstructionsPanel() {
     if (!gText || !gText->ready) return;
-    std::vector<std::string> lines = BuildHelpLines();
+    std::vector<std::string> lines = gHelpExpanded ? BuildHelpLines()
+                                                   : BuildCompactHelpLines();
     if (lines.empty()) return;
 
     glDisable(GL_DEPTH_TEST);
@@ -2353,18 +2475,50 @@ void DrawInstructionsPanel() {
 
     float pad = 16.0f;
     float lineH = 22.0f;
-    float panelH = lines.size() * lineH + 20.0f;
-    float panelW = 500.0f;
+    float headerH = 24.0f;
+    float panelH = lines.size() * lineH + 20.0f + headerH;
+    float panelW = gHelpExpanded ? 520.0f : 460.0f;
     float x = pad;
-    float y = pad; // esquina inferior izquierda
+    // Las barras de estatus ocupan ~y0=40 + 25 etiqueta + 18 barra + ~5 margen
+    // = hasta ~y=95. Subimos el panel para que el borde inferior quede por
+    // encima de ese bloque y nunca se empalmen.
+    float y = 110.0f;
 
-    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.78f));
-    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    // Sombra
+    DrawQuad2D(x + 3.0f, y - 3.0f, panelW, panelH, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+    // Fondo
+    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.85f));
+    // Lineas doradas arriba y abajo
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(x, y,                 panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados
+    const float bL = 14.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(x,                  y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x,                  y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,    y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,    y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x,                  y,               bL, bT, brCol);
+    DrawQuad2D(x,                  y,               bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,    y,               bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,    y,               bT, bL, brCol);
+
+    // Encabezado con titulo y hint de expansion.
+    const char* title = gHelpExpanded ? ">> CONTROLES (expandido)"
+                                       : ">> CONTROLES (compacto)";
+    gText->RenderText(title, x + 14.0f, y + panelH - 22.0f, 0.38f,
+                      glm::vec3(0.65f, 0.95f, 1.0f));
+    gText->RenderText(gHelpExpanded ? "H ocultar" : "H expandir",
+                      x + panelW - 105.0f, y + panelH - 22.0f, 0.34f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
 
     for (size_t i = 0; i < lines.size(); ++i) {
-        float lineY = y + panelH - 20.0f - (float)i * lineH;
+        float lineY = y + panelH - 20.0f - headerH - (float)i * lineH;
+        // Sombra del texto para legibilidad sobre fondo claro.
+        gText->RenderText(lines[i], x + 14.0f + 1.0f, lineY - 1.0f, 0.40f,
+                          glm::vec3(0.0f));
         gText->RenderText(lines[i], x + 14.0f, lineY, 0.40f,
-                          glm::vec3(0.85f, 0.88f, 0.95f));
+                          glm::vec3(0.88f, 0.92f, 0.98f));
     }
     glEnable(GL_DEPTH_TEST);
 }
@@ -2457,11 +2611,10 @@ void DrawNarrativePanel() {
 }
 
 // Barras de estatus inferiores: representan la vida diaria del astronauta
-// (agua, comida, oxigeno, energia de la base, tareas). Cada barra se dibuja
-// como un fondo oscuro + relleno proporcional al valor 0..1 + etiqueta a la
-// izquierda y porcentaje a la derecha. El bloque queda centrado en la parte
-// baja para que el jugador lo vea siempre sin estorbar el minimapa ni las
-// instrucciones.
+// (agua, comida, oxigeno, energia de la base, tareas). Estilo HUD sci-fi:
+// fondo oscuro tipo "consola", marco dorado, cada barra con su icono ASCII a
+// la izquierda, segmentos verticales sobre el relleno (look de barra LED),
+// sombra del texto y un pulso suave si la barra esta en zona critica (<25%).
 void DrawStatusBars() {
     if (!gText || !gText->ready) return;
 
@@ -2469,41 +2622,96 @@ void DrawStatusBars() {
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    struct Bar { const char* label; float value; glm::vec4 color; };
+    struct Bar { const char* label; const char* icon; float value; glm::vec4 color; };
     Bar bars[5] = {
-        { "AGUA",    gStats.agua,    glm::vec4(0.30f, 0.65f, 1.00f, 1.0f) },
-        { "COMIDA",  gStats.comida,  glm::vec4(1.00f, 0.55f, 0.25f, 1.0f) },
-        { "OXIGENO", gStats.oxigeno, glm::vec4(0.55f, 0.95f, 0.95f, 1.0f) },
-        { "ENERGIA", gStats.energia, glm::vec4(1.00f, 0.85f, 0.20f, 1.0f) },
-        { "TAREAS",  gStats.tareas,  glm::vec4(0.55f, 0.90f, 0.40f, 1.0f) },
+        { "AGUA",    "~",  gStats.agua,    glm::vec4(0.30f, 0.65f, 1.00f, 1.0f) },
+        { "COMIDA",  "@",  gStats.comida,  glm::vec4(1.00f, 0.55f, 0.25f, 1.0f) },
+        { "OXIGENO", "O2", gStats.oxigeno, glm::vec4(0.55f, 0.95f, 0.95f, 1.0f) },
+        { "ENERGIA", "+",  gStats.energia, glm::vec4(1.00f, 0.85f, 0.20f, 1.0f) },
+        { "TAREAS",  "*",  gStats.tareas,  glm::vec4(0.55f, 0.90f, 0.40f, 1.0f) },
     };
 
-    const float barW = 200.0f;
-    const float barH = 18.0f;
-    const float gap  = 16.0f;
+    const float barW   = 170.0f;
+    const float barH   = 20.0f;
+    const float gap    = 14.0f;
     const float totalW = 5 * barW + 4 * gap;
     float x0 = (SCR_WIDTH - totalW) * 0.5f;
     float y0 = 40.0f;
+    float t  = (float)glfwGetTime();
+    float critPulse = 0.7f + 0.3f * sinf(t * 4.5f);
 
-    DrawQuad2D(x0 - 14.0f, y0 - 18.0f, totalW + 28.0f, barH + 44.0f,
-               glm::vec4(0.04f, 0.07f, 0.13f, 0.78f));
-    DrawQuad2D(x0 - 14.0f, y0 + barH + 22.0f, totalW + 28.0f, 3.0f,
-               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    // Marco exterior tipo "consola": sombra inferior, fondo, doble linea
+    // dorada (encima y debajo) y dos "esquinas" estilo bracket.
+    float fx = x0 - 18.0f, fw = totalW + 36.0f;
+    float fy = y0 - 22.0f, fh = barH + 50.0f;
+    DrawQuad2D(fx + 4.0f, fy - 4.0f, fw, fh, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f)); // sombra
+    DrawQuad2D(fx, fy, fw, fh, glm::vec4(0.04f, 0.07f, 0.13f, 0.86f));
+    DrawQuad2D(fx, fy + fh - 3.0f, fw, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(fx, fy,             fw, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados en las 4 esquinas.
+    const float bL = 16.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(fx,              fy + fh - bT, bL, bT, brCol);
+    DrawQuad2D(fx,              fy + fh - bL, bT, bL, brCol);
+    DrawQuad2D(fx + fw - bL,    fy + fh - bT, bL, bT, brCol);
+    DrawQuad2D(fx + fw - bT,    fy + fh - bL, bT, bL, brCol);
+    DrawQuad2D(fx,              fy,           bL, bT, brCol);
+    DrawQuad2D(fx,              fy,           bT, bL, brCol);
+    DrawQuad2D(fx + fw - bL,    fy,           bL, bT, brCol);
+    DrawQuad2D(fx + fw - bT,    fy,           bT, bL, brCol);
+
+    // Etiqueta del bloque arriba del marco.
+    gText->RenderText("// STATUS VITAL //", fx + 14.0f, fy + fh - 18.0f, 0.36f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
 
     for (int i = 0; i < 5; ++i) {
         float bx = x0 + i * (barW + gap);
-        float v = glm::clamp(bars[i].value, 0.0f, 1.0f);
-        DrawQuad2D(bx, y0, barW, barH, glm::vec4(0.08f, 0.10f, 0.14f, 0.95f));
-        DrawQuad2D(bx, y0, barW * v, barH, bars[i].color);
-        DrawQuad2D(bx, y0 + barH - 2.0f, barW, 2.0f,
-                   glm::vec4(bars[i].color.r, bars[i].color.g, bars[i].color.b, 0.55f));
+        float v  = glm::clamp(bars[i].value, 0.0f, 1.0f);
+        bool critical = v < 0.25f;
+        float alphaPulse = critical ? critPulse : 1.0f;
 
-        gText->RenderText(bars[i].label, bx, y0 + barH + 4.0f, 0.36f,
-                          glm::vec3(0.90f, 0.93f, 0.98f));
+        // Fondo de la barra (interior, casi negro).
+        DrawQuad2D(bx, y0, barW, barH, glm::vec4(0.05f, 0.07f, 0.10f, 0.95f));
+        // Borde de la barra (linea sutil del color de la categoria).
+        glm::vec4 edge = bars[i].color * 0.35f; edge.a = 0.7f;
+        DrawQuad2D(bx,              y0,            barW, 1.0f, edge);
+        DrawQuad2D(bx,              y0 + barH - 1, barW, 1.0f, edge);
+        DrawQuad2D(bx,              y0,            1.0f, barH, edge);
+        DrawQuad2D(bx + barW - 1.0f,y0,            1.0f, barH, edge);
+
+        // Relleno principal.
+        glm::vec4 fill = bars[i].color;
+        fill.a *= alphaPulse;
+        DrawQuad2D(bx + 1.0f, y0 + 1.0f, (barW - 2.0f) * v, barH - 2.0f, fill);
+        // Brillo superior (gradiente fake con un quad mas claro).
+        glm::vec4 hi = fill; hi.r = std::min(1.0f, hi.r + 0.25f);
+                              hi.g = std::min(1.0f, hi.g + 0.25f);
+                              hi.b = std::min(1.0f, hi.b + 0.25f);
+                              hi.a *= 0.55f;
+        DrawQuad2D(bx + 1.0f, y0 + barH * 0.55f, (barW - 2.0f) * v, barH * 0.40f, hi);
+        // Segmentos verticales (look de barra LED): 10 separadores oscuros.
+        for (int s = 1; s < 10; ++s) {
+            DrawQuad2D(bx + (barW / 10.0f) * s - 1.0f, y0 + 2.0f,
+                       1.0f, barH - 4.0f,
+                       glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+        }
+
+        // Icono al inicio del label.
+        gText->RenderText(bars[i].icon, bx + 2.0f, y0 + barH + 6.0f, 0.42f,
+                          glm::vec3(bars[i].color));
+        // Etiqueta con sombra para legibilidad.
+        gText->RenderText(bars[i].label, bx + 26.0f + 1.0f, y0 + barH + 6.0f - 1.0f, 0.36f,
+                          glm::vec3(0.0f));
+        gText->RenderText(bars[i].label, bx + 26.0f, y0 + barH + 6.0f, 0.36f,
+                          glm::vec3(0.92f, 0.95f, 1.00f));
+        // Porcentaje a la derecha.
         char pct[8];
-        snprintf(pct, sizeof(pct), "%d%%", (int)(v * 100.0f + 0.5f));
-        gText->RenderText(pct, bx + barW - 50.0f, y0 + barH + 4.0f, 0.36f,
-                          glm::vec3(1.00f, 0.95f, 0.55f));
+        snprintf(pct, sizeof(pct), "%3d%%", (int)(v * 100.0f + 0.5f));
+        glm::vec3 pctCol = critical ? glm::vec3(1.0f, 0.45f, 0.45f)
+                                    : glm::vec3(1.0f, 0.95f, 0.55f);
+        gText->RenderText(pct, bx + barW - 48.0f + 1.0f, y0 + barH + 6.0f - 1.0f, 0.36f,
+                          glm::vec3(0.0f));
+        gText->RenderText(pct, bx + barW - 48.0f, y0 + barH + 6.0f, 0.36f, pctCol);
     }
 
     glEnable(GL_DEPTH_TEST);
@@ -2512,7 +2720,9 @@ void DrawStatusBars() {
 // Widget compacto siempre visible en el borde izquierdo medio. Muestra las
 // 5 tareas con un cuadrito de paloma y el titulo abreviado. Sirve como
 // recordatorio constante de que se puede pulsar Q para ver el manual
-// completo. Estilo Genshin: panel oscuro semitransparente, acento dorado.
+// completo. Estilo Genshin: panel oscuro semitransparente, marco dorado en
+// las esquinas (brackets), barra de progreso global, paloma verde con check
+// real y tarea actual resaltada con un >>.
 void DrawQuestsWidget() {
     if (!gText || !gText->ready) return;
 
@@ -2525,43 +2735,109 @@ void DrawQuestsWidget() {
         { "Preparar comida",     gStats.foodPrepared  },
     };
     int doneCount = 0;
-    for (int i = 0; i < 5; ++i) if (quests[i].done) doneCount++;
+    int firstPending = -1;
+    for (int i = 0; i < 5; ++i) {
+        if (quests[i].done) doneCount++;
+        else if (firstPending < 0) firstPending = i;
+    }
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-    const float panelW = 240.0f;
-    const float headerH = 28.0f;
-    const float rowH    = 22.0f;
-    const float panelH  = headerH + 5 * rowH + 12.0f;
-    const float x = 10.0f;
-    const float y = (SCR_HEIGHT - panelH) * 0.55f; // centrado vertical aprox.
+    const float panelW  = 260.0f;
+    const float headerH = 50.0f;
+    const float rowH    = 24.0f;
+    const float panelH  = headerH + 5 * rowH + 18.0f;
+    const float x = 12.0f;
+    const float y = (SCR_HEIGHT - panelH) * 0.55f;
 
-    // Fondo + borde dorado superior e inferior.
-    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.78f));
-    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
-    DrawQuad2D(x, y, panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.6f));
+    // Sombra del panel.
+    DrawQuad2D(x + 4.0f, y - 4.0f, panelW, panelH, glm::vec4(0.0f, 0.0f, 0.0f, 0.40f));
+    // Fondo con dos tonos verticales para dar sensacion de gradiente.
+    DrawQuad2D(x, y, panelW, panelH * 0.5f,
+               glm::vec4(0.06f, 0.10f, 0.18f, 0.88f));
+    DrawQuad2D(x, y + panelH * 0.5f, panelW, panelH * 0.5f,
+               glm::vec4(0.04f, 0.07f, 0.14f, 0.88f));
+    // Linea horizontal dorada superior + inferior.
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(x, y,                 panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados en las 4 esquinas.
+    const float bL = 16.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(x,                 y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x,                 y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,   y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,   y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x,                 y,               bL, bT, brCol);
+    DrawQuad2D(x,                 y,               bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,   y,               bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,   y,               bT, bL, brCol);
 
-    // Encabezado: titulo + contador done/5
+    // Encabezado: titulo (tipografia mayor) + contador done/5
     char header[48];
     snprintf(header, sizeof(header), "TAREAS  %d/5", doneCount);
-    gText->RenderText(header, x + 12.0f, y + panelH - 22.0f, 0.46f,
+    gText->RenderText(">> MANUAL", x + 14.0f, y + panelH - 22.0f, 0.34f,
+                      glm::vec3(0.65f, 0.95f, 1.0f));
+    gText->RenderText(header, x + 14.0f, y + panelH - 42.0f, 0.46f,
                       glm::vec3(1.0f, 0.95f, 0.55f));
-    gText->RenderText("Q = ver manual", x + 130.0f, y + panelH - 20.0f, 0.32f,
+    gText->RenderText("Q expandir", x + panelW - 110.0f, y + panelH - 22.0f, 0.32f,
                       glm::vec3(0.65f, 0.72f, 0.85f));
 
-    // Filas: cuadrito + titulo. Verde si completa, gris si no.
+    // Barra de progreso global (fina, encima de la lista).
+    float pgX = x + 14.0f, pgY = y + panelH - headerH - 4.0f;
+    float pgW = panelW - 28.0f, pgH = 4.0f;
+    DrawQuad2D(pgX, pgY, pgW, pgH, glm::vec4(0.10f, 0.13f, 0.18f, 0.9f));
+    float frac = doneCount / 5.0f;
+    DrawQuad2D(pgX, pgY, pgW * frac, pgH, glm::vec4(0.55f, 0.95f, 0.55f, 1.0f));
+
+    // Filas: chip + titulo. Verde con OK si completa; gris con > si es la
+    // siguiente pendiente; gris suave en las demas.
     for (int i = 0; i < 5; ++i) {
-        float ry = y + panelH - headerH - (i + 1) * rowH + 4.0f;
-        glm::vec4 chk = quests[i].done
-            ? glm::vec4(0.45f, 0.90f, 0.45f, 1.0f)
-            : glm::vec4(0.30f, 0.30f, 0.38f, 1.0f);
-        DrawQuad2D(x + 12.0f, ry + 4.0f, 12.0f, 12.0f, chk);
+        float ry = y + panelH - headerH - 14.0f - (i + 1) * rowH + 4.0f;
+
+        // Fondo de fila zebra y resaltado para la pendiente actual.
+        if (i == firstPending) {
+            DrawQuad2D(x + 8.0f, ry - 2.0f, panelW - 16.0f, rowH - 2.0f,
+                       glm::vec4(1.0f, 0.85f, 0.30f, 0.12f));
+        } else if (i % 2 == 0) {
+            DrawQuad2D(x + 8.0f, ry - 2.0f, panelW - 16.0f, rowH - 2.0f,
+                       glm::vec4(1.0f, 1.0f, 1.0f, 0.03f));
+        }
+
+        // Casilla con paloma o cuadrito vacio.
+        glm::vec4 chkBg = quests[i].done
+            ? glm::vec4(0.30f, 0.85f, 0.40f, 1.0f)
+            : glm::vec4(0.20f, 0.22f, 0.28f, 1.0f);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 14.0f, 14.0f, chkBg);
+        // Borde claro del cuadro
+        glm::vec4 chkB = quests[i].done
+            ? glm::vec4(0.65f, 1.0f, 0.65f, 1.0f)
+            : glm::vec4(0.55f, 0.60f, 0.70f, 1.0f);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 14.0f, 1.0f, chkB);
+        DrawQuad2D(x + 14.0f, ry + 17.0f, 14.0f, 1.0f, chkB);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 1.0f, 14.0f, chkB);
+        DrawQuad2D(x + 27.0f, ry + 4.0f, 1.0f, 14.0f, chkB);
+        // "X" dentro del cuadrito si esta completado (dos quads en diagonal).
+        if (quests[i].done) {
+            // Marca de check: dos trazos formando un tick.
+            DrawQuad2D(x + 17.0f, ry + 9.0f, 5.0f, 1.5f,
+                       glm::vec4(0.05f, 0.20f, 0.05f, 1.0f));
+            DrawQuad2D(x + 20.0f, ry + 6.0f, 1.5f, 9.0f,
+                       glm::vec4(0.05f, 0.20f, 0.05f, 1.0f));
+        }
+
+        // Flecha de "tarea actual"
+        if (i == firstPending) {
+            gText->RenderText(">", x + 36.0f, ry + 2.0f, 0.38f,
+                              glm::vec3(1.0f, 0.85f, 0.30f));
+        }
+
         glm::vec3 col = quests[i].done
-            ? glm::vec3(0.65f, 0.95f, 0.65f)
-            : glm::vec3(0.85f, 0.88f, 0.95f);
-        gText->RenderText(quests[i].title, x + 32.0f, ry + 2.0f, 0.36f, col);
+            ? glm::vec3(0.62f, 0.92f, 0.62f)
+            : (i == firstPending ? glm::vec3(1.0f, 0.95f, 0.65f)
+                                  : glm::vec3(0.78f, 0.83f, 0.92f));
+        gText->RenderText(quests[i].title, x + 48.0f, ry + 2.0f, 0.36f, col);
     }
 
     glEnable(GL_DEPTH_TEST);
@@ -2656,6 +2932,7 @@ void DrawHud() {
     DrawInstructionsPanel();
     DrawStatusBars();
     DrawQuestsWidget();
+    DrawJoystick();
     DrawZoneBanner();
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
@@ -2713,6 +2990,18 @@ void processInput(GLFWwindow* window) {
                       : "Mouse recapturado.");
     }
     keyAltLast = altNow;
+
+    // --- H: expande / colapsa el panel de controles ---
+    // Solo activo si el menu esta cerrado para no chocar con otras teclas.
+    static bool keyHLast = false;
+    bool hNow = glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS;
+    // En invernadero H tambien es la tecla para "regar maceta izq". El OSU
+    // solo lee H cuando esta active; aqui priorizamos el toggle solo si NO
+    // estamos jugando OSU (asi no interrumpimos el ritmo).
+    if (hNow && !keyHLast && menuState == MENU_NONE && !gInvernadero.active) {
+        gHelpExpanded = !gHelpExpanded;
+    }
+    keyHLast = hNow;
 
     // --- Si el menu esta abierto, solo navegacion del menu ---
     if (menuState != MENU_NONE) {
