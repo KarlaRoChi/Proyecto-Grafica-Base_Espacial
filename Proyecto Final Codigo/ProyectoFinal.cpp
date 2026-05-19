@@ -281,10 +281,45 @@ TextRenderer* gText = nullptr;
 unsigned int hudVAO = 0, hudVBO = 0;
 glm::mat4 hudProjection = glm::mat4(1.0f);
 
-enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3 };
+enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3, MENU_QUESTS = 4 };
 MenuState menuState = MENU_NONE;
 int menuSelection = 0;
 bool showMinimap = true;
+
+// =============================================================
+// VIDA DEL ASTRONAUTA: 5 barras de estatus + flags de progreso
+// =============================================================
+// La narrativa del juego es la vida cotidiana en una base sustentable: el
+// jugador debe mantener agua, comida, oxigeno, energia de la base y tareas
+// asignadas. Cada barra se llena cumpliendo una accion concreta:
+//   - AGUA / COMIDA: preparar comida en CAPSULAS (requiere haber regado las
+//     plantas antes, en el invernadero).
+//   - OXIGENO: la estacion lo provee al 100% siempre.
+//   - ENERGIA: termina el Simon del reactor.
+//   - TAREAS: termina el espectro del cometa Y el reciclaje.
+// Todas arrancan en 0.20 (excepto oxigeno = 1.0) y suben a 1.0 al cumplir.
+struct PlayerStats {
+    float agua    = 0.20f;
+    float comida  = 0.20f;
+    float oxigeno = 1.00f;
+    float energia = 0.20f;
+    float tareas  = 0.20f;
+
+    // Flags de minijuegos completados con exito (para palomear el manual y
+    // para gatear acciones encadenadas como "preparar comida").
+    bool plantsWatered    = false;  // OSU del invernadero
+    bool cometDone        = false;  // espectro del cometa
+    bool recycleDone      = false;  // clasificar todos los items
+    bool simonDone        = false;  // memoria del reactor
+    bool foodPrepared     = false;  // preparar comida en capsulas
+};
+PlayerStats gStats;
+
+// Estado de la mini-accion "preparar comida" en capsulas. Cuando arranca con
+// B muestra una barrita y al llenarse sube agua y comida.
+bool  gCookingActive = false;
+float gCookingTimer  = 0.0f;
+const float COOKING_DURATION = 3.0f;
 
 // Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
 std::string gZoneBanner;
@@ -2065,6 +2100,9 @@ void DrawControlsOverlay() {
         { "Ir a zona (HUB..Capsulas)","0 1 2 3 4" },
         { "Dificultad zona",          "5 / 6 / 7" },
         { "Recorrido: siguiente paso","N" },
+        { "Manual del Astronauta",    "Q" },
+        { "Clasificar item (reciclaje)", "F" },
+        { "Preparar comida (capsulas)",  "B" },
         { "Salir / interrumpir minijuego", "TAB" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
@@ -2407,6 +2445,125 @@ void DrawNarrativePanel() {
     glEnable(GL_DEPTH_TEST);
 }
 
+// Barras de estatus inferiores: representan la vida diaria del astronauta
+// (agua, comida, oxigeno, energia de la base, tareas). Cada barra se dibuja
+// como un fondo oscuro + relleno proporcional al valor 0..1 + etiqueta a la
+// izquierda y porcentaje a la derecha. El bloque queda centrado en la parte
+// baja para que el jugador lo vea siempre sin estorbar el minimapa ni las
+// instrucciones.
+void DrawStatusBars() {
+    if (!gText || !gText->ready) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    struct Bar { const char* label; float value; glm::vec4 color; };
+    Bar bars[5] = {
+        { "AGUA",    gStats.agua,    glm::vec4(0.30f, 0.65f, 1.00f, 1.0f) },
+        { "COMIDA",  gStats.comida,  glm::vec4(1.00f, 0.55f, 0.25f, 1.0f) },
+        { "OXIGENO", gStats.oxigeno, glm::vec4(0.55f, 0.95f, 0.95f, 1.0f) },
+        { "ENERGIA", gStats.energia, glm::vec4(1.00f, 0.85f, 0.20f, 1.0f) },
+        { "TAREAS",  gStats.tareas,  glm::vec4(0.55f, 0.90f, 0.40f, 1.0f) },
+    };
+
+    const float barW = 200.0f;
+    const float barH = 18.0f;
+    const float gap  = 16.0f;
+    const float totalW = 5 * barW + 4 * gap;
+    float x0 = (SCR_WIDTH - totalW) * 0.5f;
+    float y0 = 40.0f;
+
+    DrawQuad2D(x0 - 14.0f, y0 - 18.0f, totalW + 28.0f, barH + 44.0f,
+               glm::vec4(0.04f, 0.07f, 0.13f, 0.78f));
+    DrawQuad2D(x0 - 14.0f, y0 + barH + 22.0f, totalW + 28.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    for (int i = 0; i < 5; ++i) {
+        float bx = x0 + i * (barW + gap);
+        float v = glm::clamp(bars[i].value, 0.0f, 1.0f);
+        DrawQuad2D(bx, y0, barW, barH, glm::vec4(0.08f, 0.10f, 0.14f, 0.95f));
+        DrawQuad2D(bx, y0, barW * v, barH, bars[i].color);
+        DrawQuad2D(bx, y0 + barH - 2.0f, barW, 2.0f,
+                   glm::vec4(bars[i].color.r, bars[i].color.g, bars[i].color.b, 0.55f));
+
+        gText->RenderText(bars[i].label, bx, y0 + barH + 4.0f, 0.36f,
+                          glm::vec3(0.90f, 0.93f, 0.98f));
+        char pct[8];
+        snprintf(pct, sizeof(pct), "%d%%", (int)(v * 100.0f + 0.5f));
+        gText->RenderText(pct, bx + barW - 50.0f, y0 + barH + 4.0f, 0.36f,
+                          glm::vec3(1.00f, 0.95f, 0.55f));
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Manual del aventurero (estilo Genshin): lista de tareas/minijuegos con
+// paloma cuando se completan. Se abre con Q.
+void DrawQuestsMenu() {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    DrawQuad2D(0.0f, 0.0f, (float)SCR_WIDTH, (float)SCR_HEIGHT,
+               glm::vec4(0.0f, 0.0f, 0.05f, 0.72f));
+
+    float panelW = 620.0f, panelH = 460.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (SCR_HEIGHT - panelH) * 0.5f;
+    DrawQuad2D(panelX, panelY, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.94f));
+    DrawQuad2D(panelX, panelY + panelH - 4.0f, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+    DrawQuad2D(panelX, panelY, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+
+    float cx = SCR_WIDTH * 0.5f;
+    DrawTextCentered("MANUAL DEL ASTRONAUTA", cx, panelY + panelH - 60.0f, 0.90f,
+                     glm::vec3(0.95f, 0.82f, 0.35f));
+    DrawTextCentered("Tareas diarias en la base sustentable",
+                     cx, panelY + panelH - 95.0f, 0.45f,
+                     glm::vec3(0.75f, 0.80f, 0.90f));
+
+    struct Quest { const char* title; const char* hint; bool done; };
+    Quest quests[5] = {
+        { "Regar las plantas (Invernadero)",        "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
+        { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
+        { "Clasificar reciclaje (Reciclaje)",        "B inicia, F clasifica",          gStats.recycleDone },
+        { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (Z X C V)",        gStats.simonDone },
+        { "Preparar comida (Capsulas)",              "Requiere plantas regadas",       gStats.foodPrepared },
+    };
+
+    float yTop = panelY + panelH - 140.0f;
+    float lineH = 56.0f;
+    float labelX = panelX + 60.0f;
+
+    for (int i = 0; i < 5; ++i) {
+        float y = yTop - i * lineH;
+        DrawQuad2D(panelX + 30.0f, y - 16.0f, panelW - 60.0f, lineH - 8.0f,
+                   glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
+        // Cuadrito de paloma
+        glm::vec4 chk = quests[i].done
+            ? glm::vec4(0.45f, 0.90f, 0.45f, 1.0f)
+            : glm::vec4(0.30f, 0.30f, 0.38f, 1.0f);
+        DrawQuad2D(panelX + 36.0f, y + 4.0f, 18.0f, 18.0f, chk);
+        if (gText && gText->ready) {
+            if (quests[i].done) {
+                gText->RenderText("OK", panelX + 38.0f, y + 6.0f, 0.34f,
+                                  glm::vec3(0.10f, 0.20f, 0.10f));
+            }
+            glm::vec3 titleCol = quests[i].done
+                ? glm::vec3(0.65f, 0.95f, 0.65f)
+                : glm::vec3(0.92f, 0.95f, 1.00f);
+            gText->RenderText(quests[i].title, labelX + 8.0f, y + 12.0f, 0.50f, titleCol);
+            gText->RenderText(quests[i].hint,  labelX + 8.0f, y - 10.0f, 0.36f,
+                              glm::vec3(0.60f, 0.66f, 0.78f));
+        }
+    }
+
+    DrawTextCentered("Pulsa Q o ESC para cerrar", cx, panelY + 22.0f, 0.40f,
+                     glm::vec3(0.55f, 0.60f, 0.70f));
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawHud() {
     if (!hudShader) return;
     // El HUD usa proyeccion ortografica que el callback de resize mantiene
@@ -2414,6 +2571,10 @@ void DrawHud() {
     // dibuja segun el estado del menu.
     if (menuState == MENU_CONTROLS) {
         DrawControlsOverlay();
+        return;
+    }
+    if (menuState == MENU_QUESTS) {
+        DrawQuestsMenu();
         return;
     }
     if (menuState == MENU_PAUSE) {
@@ -2424,6 +2585,7 @@ void DrawHud() {
     // HUD en juego (menu cerrado)
     DrawMinimap();
     DrawInstructionsPanel();
+    DrawStatusBars();
     DrawZoneBanner();
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
@@ -2440,12 +2602,33 @@ void processInput(GLFWwindow* window) {
             menuSelection = 0;
         } else if (menuState == MENU_PAUSE) {
             menuState = MENU_NONE;
+        } else if (menuState == MENU_QUESTS) {
+            // El manual es independiente del menu de pausa: ESC lo cierra de
+            // golpe en vez de regresar a la pausa, que no fue la pantalla
+            // previa.
+            menuState = MENU_NONE;
         } else {
             menuState = MENU_PAUSE; // desde un sub-menu, vuelve a pausa
             menuSelection = 0;
         }
     }
     keyEscLast = escNow;
+
+    // --- Q: Manual del Astronauta (toggle global, abre y cierra) ---
+    // Se procesa antes del early-return del menu para que Q tambien sirva
+    // para cerrar el manual una vez abierto. Si hay otro menu activo, Q lo
+    // reemplaza por el manual.
+    static bool keyQLast = false;
+    bool qNow = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
+    if (qNow && !keyQLast) {
+        if (menuState == MENU_QUESTS) {
+            menuState = MENU_NONE;
+        } else {
+            menuState = MENU_QUESTS;
+            menuSelection = 0;
+        }
+    }
+    keyQLast = qNow;
 
     // --- Si el menu esta abierto, solo navegacion del menu ---
     if (menuState != MENU_NONE) {
@@ -2787,20 +2970,43 @@ void processInput(GLFWwindow* window) {
             }
         }
 
-        // ---- INTERACCION SEPARAR BASURA (DEJADA LISTA, COMENTADA) ----
-        // Idea: el usuario deberá tomar (raycast/clic) cada item y depositarlo en el
-        // bote correspondiente. Por ahora dejamos el esqueleto preparado:
-        //
-        // if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        //     // 1) Hacer ray-pick contra gReciclaje.items y los botes
-        //     //    - si el item esta cerca del jugador -> gReciclaje.selectedItem = idx;
-        //     //    - si ya hay item seleccionado y se clickea un bote ->
-        //     //      MaterialType bin = gReciclaje.items[selectedItem].type
-        //     //                         == bin  -> score++  (acierto)
-        //     //                         != bin  -> score--  (fallo)
-        //     //      gReciclaje.items[selectedItem].sorted = true;
-        //     //      gReciclaje.selectedItem = -1;
-        // }
+        // ---- F = clasificar item mas cercano al bote correcto ----
+        // El jugador se acerca al item, pulsa F y el sistema lo manda al
+        // bote del color que le corresponde (sorted=true). Al limpiar todos
+        // los items se marca recycleDone y la barra de tareas se llena.
+        static bool keyFRecLast = false;
+        bool fKeyRec = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
+        if (gReciclaje.active && fKeyRec && !keyFRecLast) {
+            int nearest = -1;
+            float bestD = 2.5f * 2.5f;
+            for (size_t i = 0; i < gReciclaje.items.size(); ++i) {
+                if (gReciclaje.items[i].sorted) continue;
+                glm::vec3 d = gReciclaje.items[i].position - player.position;
+                float dd = d.x * d.x + d.z * d.z;
+                if (dd < bestD) { bestD = dd; nearest = (int)i; }
+            }
+            if (nearest >= 0) {
+                gReciclaje.items[nearest].sorted = true;
+                gReciclaje.score += 50;
+                const char* matName = (gReciclaje.items[nearest].type == MAT_METAL)
+                                       ? "metal"
+                                       : (gReciclaje.items[nearest].type == MAT_VIDRIO ? "vidrio" : "carton");
+                char buf[100];
+                snprintf(buf, sizeof(buf), "Clasificado: %s. Quedan items en el piso.", matName);
+                PushNarrative(buf);
+                std::cout << "[Reciclaje] Item " << nearest << " -> " << matName << std::endl;
+
+                // Si ya no quedan items sin clasificar, mision cumplida.
+                bool anyLeft = false;
+                for (auto& it : gReciclaje.items) if (!it.sorted) { anyLeft = true; break; }
+                if (!anyLeft && !gStats.recycleDone) {
+                    gStats.recycleDone = true;
+                    gStats.tareas      = gStats.cometDone ? 1.0f : 0.60f;
+                    PushNarrative("Reciclaje completo. Tarea de la comunidad cumplida.");
+                }
+            }
+        }
+        keyFRecLast = fKeyRec;
     }
 
     // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
@@ -2874,7 +3080,35 @@ void processInput(GLFWwindow* window) {
         }
     }
 
-    // ZONA 4: CAPSULAS - zona de descanso, sin minijuego.
+    // ZONA 4: CAPSULAS - mini-accion "preparar comida".
+    // B inicia una cuenta regresiva COOKING_DURATION; al terminar llena las
+    // barras de agua y comida y palomea la tarea. Requiere que las plantas
+    // ya esten regadas (gStats.plantsWatered == true), si no muestra aviso.
+    if (currentZone == 4) {
+        static bool keyBCapLast = false;
+        bool bCap = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bCap && !keyBCapLast && !gCookingActive && !gStats.foodPrepared) {
+            if (!gStats.plantsWatered) {
+                PushNarrative("Necesitas regar las plantas del invernadero primero.");
+            } else {
+                gCookingActive = true;
+                gCookingTimer  = 0.0f;
+                PushNarrative("Preparando comida con cultivos frescos...");
+            }
+        }
+        keyBCapLast = bCap;
+
+        if (gCookingActive) {
+            gCookingTimer += deltaTime;
+            if (gCookingTimer >= COOKING_DURATION) {
+                gCookingActive    = false;
+                gStats.foodPrepared = true;
+                gStats.agua       = 1.0f;
+                gStats.comida     = 1.0f;
+                PushNarrative("Comida lista. Agua y comida al 100%.");
+            }
+        }
+    }
 }
 
 void SetLightUniforms(Shader* shader) {
@@ -3090,6 +3324,14 @@ void UpdateInvernaderoGame(float dt) {
                       << "  MaxCombo=" << gInvernadero.maxCombo << std::endl;
             reported = true;
         }
+        // Exito si acerto TODAS las notas. Marca plants_watered y desbloquea
+        // la preparacion de comida en capsulas. Solo dispara una vez por
+        // partida; el flag persiste hasta que se reinicia el minijuego.
+        if (!gStats.plantsWatered &&
+            gInvernadero.hits >= (int)gInvernadero.notes.size()) {
+            gStats.plantsWatered = true;
+            PushNarrative("Plantas regadas. Ya puedes preparar comida en CAPSULAS.");
+        }
     }
 }
 
@@ -3263,6 +3505,13 @@ void EnergiaPress(int button) {
             PushNarrative(buf);
             std::cout << "[Simon] NIVEL " << gEnergia.level
                       << "  Score=" << gEnergia.score << std::endl;
+            // El reactor de la estacion se da por estable al alcanzar nivel 3.
+            // Llena la barra de energia y palomea la tarea del manual.
+            if (!gStats.simonDone && gEnergia.level >= 3) {
+                gStats.simonDone = true;
+                gStats.energia   = 1.0f;
+                PushNarrative("Reactor estable. Energia de la base al 100%.");
+            }
         } else {
             PushNarrative("Vas bien, sigue la secuencia.");
         }
@@ -3581,6 +3830,15 @@ static void EspectroStopBar() {
                  gEspectro.hits, gEspectro.rounds,
                  gEspectro.score, gEspectro.maxCombo);
         PushNarrative(buf);
+
+        // Marca el cometa como terminado si tuvo mas aciertos que fallos.
+        // Suma medio relleno a la barra de tareas (la otra mitad la pone
+        // reciclaje); cuando ambas tareas se cumplen la barra llega al 100%.
+        if (!gStats.cometDone && gEspectro.hits > gEspectro.misses) {
+            gStats.cometDone = true;
+            gStats.tareas    = gStats.recycleDone ? 1.0f : 0.60f;
+            PushNarrative("Cometa catalogado. Tarea cientifica registrada.");
+        }
     }
 }
 
