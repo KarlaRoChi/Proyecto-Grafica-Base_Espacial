@@ -633,17 +633,27 @@ const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 //   idx 1 VERDE    -> R_1_21 (top-left)
 //   idx 2 AZUL     -> R_1_10 (bot-right)
 //   idx 3 AMARILLO -> R_1_11 (bot-left)
+//
+// IMPORTANTE sobre la coordenada X: el boton fisico es un cubo que va
+// de x=5.076 (cara que mira al jugador) a x=5.116 (cara pegada a la
+// pila). Como la camara queda en X mas chico (~x=2.7) y mira hacia +X,
+// la cara VISIBLE del boton es la de x=5.076. Por eso colocamos el
+// "centro de click" justo sobre esa cara (x=5.076) y la membrana se
+// separa hacia -X (toward camera, OFFSET negativo) para flotar entre
+// la camara y el boton. Antes usabamos x=5.116 con offset positivo y
+// la membrana quedaba DETRAS del boton (oculta por el cubo).
 const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
-    glm::vec3(5.116f, 1.50f, 12.90f),  // 0 ROJO     - top-right (R_1_20)
-    glm::vec3(5.116f, 1.50f, 12.60f),  // 1 VERDE    - top-left  (R_1_21)
-    glm::vec3(5.116f, 1.10f, 12.90f),  // 2 AZUL     - bot-right (R_1_10)
-    glm::vec3(5.116f, 1.10f, 12.60f)   // 3 AMARILLO - bot-left  (R_1_11)
+    glm::vec3(5.076f, 1.50f, 12.90f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.076f, 1.50f, 12.60f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.076f, 1.10f, 12.90f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.076f, 1.10f, 12.60f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
 // Centro del cluster de 4 botones (para enfocar la camara y centrar HUD).
-const glm::vec3 SIMON_CLUSTER_CENTER = glm::vec3(5.116f, 1.30f, 12.75f);
-// Normal hacia el jugador (los botones miran +X; la membrana se separa
-// 2.2 cm hacia +X para flotar justo delante de cada boton real).
-const float SIMON_MEMBRANE_OFFSET = 0.022f;
+const glm::vec3 SIMON_CLUSTER_CENTER = glm::vec3(5.076f, 1.30f, 12.75f);
+// Separacion en X de la membrana respecto a la cara del boton. Negativo
+// = hacia el jugador (entre la camara y el boton). 3.5 cm para que el
+// plano flote claramente DELANTE del cubo sin clipear con el modelo.
+const float SIMON_MEMBRANE_OFFSET = -0.035f;
 
 // Colores y etiquetas de los 4 botones del Simon. Globales (compartidas
 // por DrawEnergiaGame, DrawEnergiaHUD, EnergiaPress y la actualizacion de
@@ -916,6 +926,11 @@ void InitRooms() {
 
     for (int i = 0; i < 5; ++i) rooms[i].freeCamPos = glm::vec3(0.0f, 5.0f, 12.0f);
 
+    // El minijuego de reciclaje esta deshabilitado temporalmente. Marcamos
+    // la tarea como completa de entrada para que la barra TAREAS pueda
+    // llegar al 100% solo con el espectro del cometa.
+    gStats.recycleDone = true;
+
     // Ubicaciones iniciales de las cajas
     for (int i = 0; i < 5; ++i) {
         interactiveBoxes[i].startPos = glm::vec3(6.5f + (i * 0.5f), 0.1f, (i % 2 == 0) ? -1.5f : 1.5f);
@@ -1073,8 +1088,8 @@ void ChangeZone(int z) {
         PushNarrative("Tarea: riega las plantas siguiendo el ritmo. Pulsa B para empezar.");
         break;
     case 2:
-        PushNarrative("RECICLAJE: clasifica los desechos por tipo de material.");
-        PushNarrative("Tarea: ordena los desechos en las cajas correctas. Pulsa B para empezar.");
+        PushNarrative("RECICLAJE: zona de almacen. El modulo de clasificacion esta en mantenimiento.");
+        PushNarrative("Puedes recorrer la sala con libertad y volver al HUB por la puerta luminosa.");
         break;
     case 3:
         PushNarrative("ENERGIA: el reactor necesita un patron de encendido.");
@@ -1966,24 +1981,11 @@ bool Update() {
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
         if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
 
-        // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
-        if (CAJA_MODELO) {
-            SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
-            for (int i = 0; i < 5; i++) {
-                glm::mat4 m(1.0f);
-                m = glm::translate(m, interactiveBoxes[i].position);
-                m = glm::rotate(m, interactiveBoxes[i].rotationY, glm::vec3(0.0f, 1.0f, 0.0f));
-                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-                // Escala base ajustada a 0.5f, multiplicada por su escala interactiva
-                m = glm::scale(m, glm::vec3(0.5f * interactiveBoxes[i].scale));
-
-                phongShader->setMat4("model", m);
-                CAJA_MODELO->Draw(*phongShader);
-            }
-        }
-
-        // ====== MINIJUEGO RECICLAJE (items + botes) ======
-        if (gReciclaje.active) DrawReciclajeGame(projection, view);
+        // ====== CAJAS INTERACTIVAS Y MINIJUEGO RECICLAJE: DESHABILITADOS ======
+        // El usuario pidio retirar temporalmente las 5 cajas que se mueven y
+        // el minijuego de clasificar desechos. Conservamos la sala (modelo
+        // RECICLAJE_OPACO/METAL) y las estructuras de datos por si se quiere
+        // reactivar mas adelante; solo se omiten el dibujo y los controles.
 
         // Puerta de retorno al HUB (zoneDoors[5], borde oeste del modulo)
         DrawZoneDoor(5, zoneDoors[5], RETURN_DOOR_YAW[1]);
@@ -2184,7 +2186,6 @@ void DrawControlsOverlay() {
         { "Recorrido: siguiente paso","N" },
         { "Manual del Astronauta",    "Q" },
         { "Liberar / recapturar mouse","ALT" },
-        { "Clasificar item (reciclaje)", "F" },
         { "Preparar comida (capsulas)",  "B" },
         { "Salir / interrumpir minijuego", "TAB" }
     };
@@ -2475,8 +2476,8 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
         break;
     case 2: // RECICLAJE
-        out.push_back("O/L rota | U/J Y/H I/K mueven cajas | T/G escala | R reset");
-        if (d <= DIFF_EASY) out.push_back("Cada caja tiene un control distinto; experimenta con cada una");
+        out.push_back("Zona libre: el minijuego de clasificacion esta desactivado de momento");
+        if (d <= DIFF_EASY) out.push_back("Puedes recorrer la sala y volver al HUB por la puerta luminosa");
         break;
     case 3: // ENERGIA
         out.push_back("B = iniciar Simon (la camara se fija a la pila)  |  Clic en la membrana o Z X C V");
@@ -2505,7 +2506,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
     switch (currentZone) {
         case 0: zoneHint = "HUB: camina a una puerta luminosa para entrar a un modulo";        break;
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
-        case 2: zoneHint = "RECICLAJE: B inicia  |  F clasifica el item mas cercano";          break;
+        case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
         case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
         case 4: zoneHint = "CAPSULAS: B prepara comida (necesita plantas regadas)";            break;
     }
@@ -2781,7 +2782,7 @@ void DrawQuestsWidget() {
     Mini quests[5] = {
         { "Regar plantas",       gStats.plantsWatered },
         { "Catalogar cometa",    gStats.cometDone     },
-        { "Reciclar desechos",   gStats.recycleDone   },
+        { "Visitar almacen",     gStats.recycleDone   },
         { "Estabilizar reactor", gStats.simonDone     },
         { "Preparar comida",     gStats.foodPrepared  },
     };
@@ -2922,7 +2923,7 @@ void DrawQuestsMenu() {
     Quest quests[5] = {
         { "Regar las plantas (Invernadero)",        "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
         { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
-        { "Clasificar reciclaje (Reciclaje)",        "B inicia, F clasifica",          gStats.recycleDone },
+        { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
         { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
         { "Preparar comida (Capsulas)",              "Requiere plantas regadas",       gStats.foodPrepared },
     };
@@ -3347,92 +3348,11 @@ void processInput(GLFWwindow* window) {
     // - Rotacion con O/L (mientras esten libres no choquen con el OSU de invernadero)
     // - Reset con R
     // La logica de separar items (metal/vidrio/carton) se deja COMENTADA y lista.
-    if (currentZone == 2) {
-        float boxSpeed = 2.5f * deltaTime;
-
-        // B = iniciar el modulo de reciclaje (activa items y narrativa)
-        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
-        if (bKey && !keyBLast) {
-            InitReciclajeGame();
-            gReciclaje.active = true;
-            PushNarrative("RECICLAJE: ordena los desechos segun el tipo de material.");
-            PushNarrative("Pulsa TAB para cambiar de caja e I J K L para moverla.");
-            std::cout << "[Reciclaje] Nueva partida (dificultad " << gReciclaje.difficulty << ")" << std::endl;
-        }
-        keyBLast = bKey;
-
-        bool tabKey = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
-        if (tabKey && !keyTabLast) {
-            gReciclaje.selectedBox = (gReciclaje.selectedBox + 1) % 5;
-            std::cout << "[Reciclaje] Caja activa: " << gReciclaje.selectedBox << std::endl;
-        }
-        keyTabLast = tabKey;
-
-        int s = gReciclaje.selectedBox;
-        InteractiveBox& box = interactiveBoxes[s];
-
-        // Movimiento en los 3 ejes para la caja seleccionada
-        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) box.position.z -= boxSpeed; // adelante
-        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) box.position.z += boxSpeed; // atras
-        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) box.position.x -= boxSpeed; // izquierda
-        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) box.position.x += boxSpeed; // derecha
-        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) box.position.y += boxSpeed; // sube
-        if (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS) box.position.y -= boxSpeed; // baja
-        if (box.position.y < 0.0f) box.position.y = 0.0f;
-        if (box.position.y > 3.0f) box.position.y = 3.0f;
-
-        // Rotacion y escala de la caja seleccionada
-        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) box.rotationY -= boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS) box.rotationY += boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) box.scale -= 1.0f * deltaTime;
-        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) box.scale += 1.0f * deltaTime;
-
-        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
-            for (int i = 0; i < 5; ++i) {
-                interactiveBoxes[i].position = interactiveBoxes[i].startPos;
-                interactiveBoxes[i].rotationY = 0.0f;
-                interactiveBoxes[i].scale = 1.0f;
-            }
-        }
-
-        // ---- F = clasificar item mas cercano al bote correcto ----
-        // El jugador se acerca al item, pulsa F y el sistema lo manda al
-        // bote del color que le corresponde (sorted=true). Al limpiar todos
-        // los items se marca recycleDone y la barra de tareas se llena.
-        static bool keyFRecLast = false;
-        bool fKeyRec = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
-        if (gReciclaje.active && fKeyRec && !keyFRecLast) {
-            int nearest = -1;
-            float bestD = 2.5f * 2.5f;
-            for (size_t i = 0; i < gReciclaje.items.size(); ++i) {
-                if (gReciclaje.items[i].sorted) continue;
-                glm::vec3 d = gReciclaje.items[i].position - player.position;
-                float dd = d.x * d.x + d.z * d.z;
-                if (dd < bestD) { bestD = dd; nearest = (int)i; }
-            }
-            if (nearest >= 0) {
-                gReciclaje.items[nearest].sorted = true;
-                gReciclaje.score += 50;
-                const char* matName = (gReciclaje.items[nearest].type == MAT_METAL)
-                                       ? "metal"
-                                       : (gReciclaje.items[nearest].type == MAT_VIDRIO ? "vidrio" : "carton");
-                char buf[100];
-                snprintf(buf, sizeof(buf), "Clasificado: %s. Quedan items en el piso.", matName);
-                PushNarrative(buf);
-                std::cout << "[Reciclaje] Item " << nearest << " -> " << matName << std::endl;
-
-                // Si ya no quedan items sin clasificar, mision cumplida.
-                bool anyLeft = false;
-                for (auto& it : gReciclaje.items) if (!it.sorted) { anyLeft = true; break; }
-                if (!anyLeft && !gStats.recycleDone) {
-                    gStats.recycleDone = true;
-                    gStats.tareas      = gStats.cometDone ? 1.0f : 0.60f;
-                    PushNarrative("Reciclaje completo. Tarea de la comunidad cumplida.");
-                }
-            }
-        }
-        keyFRecLast = fKeyRec;
-    }
+    // ZONA 2: RECICLAJE - minijuego y cajas interactivas DESHABILITADOS.
+    // El usuario pidio retirar la mecanica de mover cajas y la clasificacion
+    // de desechos, asi que la sala queda como zona libre, sin controles
+    // propios. gStats.recycleDone se inicializa en true (ver InitRooms) para
+    // que la barra TAREAS pueda llegar al 100% solo con el espectro.
 
     // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
     if (currentZone == 3) {
