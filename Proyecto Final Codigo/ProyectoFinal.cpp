@@ -249,8 +249,12 @@ public:
 
 // ============ GLOBALES ============
 GLFWwindow* window;
-const unsigned int SCR_WIDTH = 1024;
-const unsigned int SCR_HEIGHT = 768;
+// Tamano de la ventana. NO es const para que framebuffer_size_callback los
+// actualice en cada resize / paso a pantalla completa: el HUD lee estos
+// valores cada frame, asi el minimapa, las barras de estatus, el panel de
+// instrucciones, el manual, etc. se reposicionan solos sin codigo extra.
+unsigned int SCR_WIDTH  = 1024;
+unsigned int SCR_HEIGHT = 768;
 
 Camera camera(glm::vec3(0.0f, 2.0f, 10.0f));
 int currentZone = 0;
@@ -320,6 +324,11 @@ PlayerStats gStats;
 bool  gCookingActive = false;
 float gCookingTimer  = 0.0f;
 const float COOKING_DURATION = 3.0f;
+
+// ALT libera el mouse (lo descaptura) sin abrir ningun menu. Util para
+// mover la ventana, alt-tabear o hacer una captura de pantalla. Cuando esta
+// liberado mouse_callback no rota la camara y el cursor se ve.
+bool gCursorReleased = false;
 
 // Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
 std::string gZoneBanner;
@@ -1449,7 +1458,8 @@ bool Update() {
     // gigantesco en el yaw del jugador.
     static bool prevWantCursor = false;
     bool wantCursor = (menuState != MENU_NONE) ||
-                      (currentZone == 3 && gEnergia.active && gMinigameCamLocked);
+                      (currentZone == 3 && gEnergia.active && gMinigameCamLocked) ||
+                      gCursorReleased;
     if (wantCursor != prevWantCursor) {
         glfwSetInputMode(window, GLFW_CURSOR,
                          wantCursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
@@ -2101,6 +2111,7 @@ void DrawControlsOverlay() {
         { "Dificultad zona",          "5 / 6 / 7" },
         { "Recorrido: siguiente paso","N" },
         { "Manual del Astronauta",    "Q" },
+        { "Liberar / recapturar mouse","ALT" },
         { "Clasificar item (reciclaje)", "F" },
         { "Preparar comida (capsulas)",  "B" },
         { "Salir / interrumpir minijuego", "TAB" }
@@ -2498,6 +2509,64 @@ void DrawStatusBars() {
     glEnable(GL_DEPTH_TEST);
 }
 
+// Widget compacto siempre visible en el borde izquierdo medio. Muestra las
+// 5 tareas con un cuadrito de paloma y el titulo abreviado. Sirve como
+// recordatorio constante de que se puede pulsar Q para ver el manual
+// completo. Estilo Genshin: panel oscuro semitransparente, acento dorado.
+void DrawQuestsWidget() {
+    if (!gText || !gText->ready) return;
+
+    struct Mini { const char* title; bool done; };
+    Mini quests[5] = {
+        { "Regar plantas",       gStats.plantsWatered },
+        { "Catalogar cometa",    gStats.cometDone     },
+        { "Reciclar desechos",   gStats.recycleDone   },
+        { "Estabilizar reactor", gStats.simonDone     },
+        { "Preparar comida",     gStats.foodPrepared  },
+    };
+    int doneCount = 0;
+    for (int i = 0; i < 5; ++i) if (quests[i].done) doneCount++;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const float panelW = 240.0f;
+    const float headerH = 28.0f;
+    const float rowH    = 22.0f;
+    const float panelH  = headerH + 5 * rowH + 12.0f;
+    const float x = 10.0f;
+    const float y = (SCR_HEIGHT - panelH) * 0.55f; // centrado vertical aprox.
+
+    // Fondo + borde dorado superior e inferior.
+    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.78f));
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(x, y, panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.6f));
+
+    // Encabezado: titulo + contador done/5
+    char header[48];
+    snprintf(header, sizeof(header), "TAREAS  %d/5", doneCount);
+    gText->RenderText(header, x + 12.0f, y + panelH - 22.0f, 0.46f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
+    gText->RenderText("Q = ver manual", x + 130.0f, y + panelH - 20.0f, 0.32f,
+                      glm::vec3(0.65f, 0.72f, 0.85f));
+
+    // Filas: cuadrito + titulo. Verde si completa, gris si no.
+    for (int i = 0; i < 5; ++i) {
+        float ry = y + panelH - headerH - (i + 1) * rowH + 4.0f;
+        glm::vec4 chk = quests[i].done
+            ? glm::vec4(0.45f, 0.90f, 0.45f, 1.0f)
+            : glm::vec4(0.30f, 0.30f, 0.38f, 1.0f);
+        DrawQuad2D(x + 12.0f, ry + 4.0f, 12.0f, 12.0f, chk);
+        glm::vec3 col = quests[i].done
+            ? glm::vec3(0.65f, 0.95f, 0.65f)
+            : glm::vec3(0.85f, 0.88f, 0.95f);
+        gText->RenderText(quests[i].title, x + 32.0f, ry + 2.0f, 0.36f, col);
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 // Manual del aventurero (estilo Genshin): lista de tareas/minijuegos con
 // paloma cuando se completan. Se abre con Q.
 void DrawQuestsMenu() {
@@ -2586,6 +2655,7 @@ void DrawHud() {
     DrawMinimap();
     DrawInstructionsPanel();
     DrawStatusBars();
+    DrawQuestsWidget();
     DrawZoneBanner();
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
@@ -2629,6 +2699,20 @@ void processInput(GLFWwindow* window) {
         }
     }
     keyQLast = qNow;
+
+    // --- ALT: libera / recaptura el mouse (cursor visible para mover la
+    // ventana o hacer alt-tab sin que la camara se vuelva loca). Se procesa
+    // antes del early-return para que tambien funcione con un menu abierto.
+    static bool keyAltLast = false;
+    bool altNow = (glfwGetKey(window, GLFW_KEY_LEFT_ALT)  == GLFW_PRESS) ||
+                  (glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
+    if (altNow && !keyAltLast) {
+        gCursorReleased = !gCursorReleased;
+        PushNarrative(gCursorReleased
+                      ? "Mouse liberado (ALT para recapturarlo)."
+                      : "Mouse recapturado.");
+    }
+    keyAltLast = altNow;
 
     // --- Si el menu esta abierto, solo navegacion del menu ---
     if (menuState != MENU_NONE) {
@@ -3127,7 +3211,12 @@ void SetLightUniforms(Shader* shader) {
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    if (width <= 0 || height <= 0) return; // ventana minimizada: ignora
     glViewport(0, 0, width, height);
+    // Actualiza SCR_WIDTH/HEIGHT para que todo el HUD se recompute (las
+    // funciones de dibujo leen estas globales cada frame).
+    SCR_WIDTH  = (unsigned int)width;
+    SCR_HEIGHT = (unsigned int)height;
     hudProjection = glm::ortho(0.0f, (float)width, 0.0f, (float)height);
     if (gText) gText->SetProjection(width, height);
 }
@@ -3136,6 +3225,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     float xoffset = (float)xpos - lastX; float yoffset = lastY - (float)ypos;
     lastX = (float)xpos; lastY = (float)ypos;
     if (menuState != MENU_NONE) return;
+    if (gCursorReleased) return; // ALT mantiene el cursor libre, no rotar camara
     if (gMinigameCamLocked) return; // camara fija durante minijuego
     if (cameraMode == CAM_FREE) {
         camera.ProcessMouseMovement(xoffset, yoffset);
