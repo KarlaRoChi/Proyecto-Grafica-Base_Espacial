@@ -533,10 +533,10 @@ const glm::vec3 INV_PLANT_POSITIONS[4] = {
 };
 // En FACIL solo se usan 2 macetas y queremos que coincidan visualmente con
 // las dos primeras macetas reales del modelo del invernadero (mas juntas y
-// desplazadas en +x respecto a la fila izquierda original).
+// desplazadas en +z respecto a la fila izquierda original).
 const glm::vec3 INV_PLANT_POSITIONS_EASY[2] = {
-    glm::vec3(-2.0f, 0.0f, -10.0f), // 0 = mas centrada
-    glm::vec3(-2.0f, 0.0f, -12.0f)  // 1 = al lado de la anterior
+    glm::vec3(-3.5f, 0.0f,  -8.5f), // 0 = mas hacia el frente
+    glm::vec3(-3.5f, 0.0f, -10.5f)  // 1 = junto a la anterior
 };
 // Devuelve la posicion de la maceta del carril segun la dificultad activa.
 static glm::vec3 InvLanePos(int lane) {
@@ -1211,10 +1211,10 @@ bool Start() {
 // devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        // Centro desplazado en +x para encuadrar mejor las macetas reales
-        // del invernadero (que estan corridas hacia la derecha en el modelo).
-        glm::vec3 center(1.5f, 0.0f, -11.0f);
-        glm::vec3 eye(1.5f, 10.0f, -10.99f);
+        // Centro desplazado en +z para encuadrar mejor las macetas reales
+        // del invernadero (corridas hacia el frente del modulo).
+        glm::vec3 center(0.0f, 0.0f, -9.5f);
+        glm::vec3 eye(0.0f, 10.0f, -9.49f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
@@ -1285,7 +1285,7 @@ glm::mat4 ComputeView() {
 
 glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        return glm::vec3(1.5f, 14.0f, -9.99f);
+        return glm::vec3(0.0f, 14.0f, -8.49f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
         glm::vec3 eye, target;
@@ -3097,14 +3097,13 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // Colores por carril: las dos macetas de la fila IZQ comparten tonos
-    // verdes, las dos de la fila DER comparten tonos azules para que se
-    // distingan visualmente las dos "filas de ritmo".
+    // Colores por carril: 4 colores distintos para que cada maceta sea
+    // facilmente identificable y se vea que es translucida (no solida).
     glm::vec4 laneColors[4] = {
-        glm::vec4(0.55f, 0.95f, 0.40f, 1.0f), // izq atras  verde claro
-        glm::vec4(0.20f, 0.80f, 0.30f, 1.0f), // izq adelante verde oscuro
-        glm::vec4(0.55f, 0.80f, 1.00f, 1.0f), // der atras  celeste
-        glm::vec4(0.20f, 0.55f, 1.00f, 1.0f)  // der adelante azul
+        glm::vec4(1.00f, 0.30f, 0.40f, 1.0f), // 0 = rojo / coral
+        glm::vec4(0.35f, 0.95f, 0.40f, 1.0f), // 1 = verde
+        glm::vec4(0.30f, 0.65f, 1.00f, 1.0f), // 2 = azul
+        glm::vec4(1.00f, 0.85f, 0.20f, 1.0f)  // 3 = amarillo
     };
 
     int lanes = gInvernadero.activeLanes;
@@ -3112,21 +3111,24 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     if (lanes > 4) lanes = 4;
 
     // 1) Marcador plano sobre cada maceta ACTIVA para indicar donde caera la
-    //    nota. Usa PLANO_MODELO directamente (mas natural que un cubo
-    //    aplanado). Se respetan las macetas originales del modelo
-    //    INVERNADERO_OPACO; el marcador apenas roza el piso (y = 0.02) y
-    //    "florece" cuando recibimos un acierto (waterEffect).
+    //    nota. Usa PLANO_MODELO con blend para que se vea translucido sobre
+    //    el suelo del invernadero.
     // En FACIL las macetas se ven mas pequenias para coincidir con las
     // macetas reales del modelo (que tambien son chicas).
     float laneSizeBase = (lanes == 2) ? 0.55f : 0.85f;
     float laneCylSize  = (lanes == 2) ? 0.70f : 1.10f;
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = InvLanePos(i);
         base.y = 0.02f;
         float pulse = 0.55f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
         float waterBoost = gInvernadero.waterEffect[i];
         glm::vec4 c = laneColors[i] * (pulse + waterBoost * 1.5f);
+        c.a = 0.55f + waterBoost * 0.35f;
         SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.4f), 32);
+        phongShader->setFloat("transparency", c.a);
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
@@ -3137,17 +3139,14 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     }
 
     // 1b) Capa de transparencia de color encima de las macetas activas: un
-    //     cilindro semi-translucido que envuelve la maceta original sin
-    //     ocultarla. Asi el jugador identifica facil cuales son los carriles.
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
+    //     cilindro semi-translucido (mas tenue que el plano) que tine el
+    //     volumen de la maceta sin ocultarla.
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = InvLanePos(i);
         base.y = 0.4f;
         float pulse = 0.50f + 0.25f * sinf(gInvernadero.gameTime * 1.8f + i);
         glm::vec4 c = laneColors[i];
-        c.a = 0.35f + 0.15f * pulse + gInvernadero.waterEffect[i] * 0.30f;
+        c.a = 0.30f + 0.15f * pulse + gInvernadero.waterEffect[i] * 0.30f;
         SetMaterial(phongShader, c * 0.5f, c, glm::vec4(0.2f), 16);
         phongShader->setFloat("transparency", c.a);
 
@@ -3157,15 +3156,13 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
-    phongShader->setFloat("transparency", 1.0f);
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
 
-    // 2) Notas: se acercan horizontalmente desde el muro exterior de su
-    //    fila. Aparecen lookAhead segundos antes y desaparecen 0.4 s
-    //    despues del hitTime (ventana de fallo).
+    // 2) Notas: pequenios cubos translucidos que se acercan horizontalmente
+    //    desde el muro exterior de su fila. Aparecen lookAhead segundos
+    //    antes y desaparecen 0.4 s despues del hitTime. Translucidos para
+    //    que coincidan con el estilo de los marcadores.
     float lookAhead = 2.0f;
-    float scrollDist = 5.5f; // unidades que recorre la nota antes de llegar
+    float scrollDist = 5.5f;
     for (auto& n : gInvernadero.notes) {
         if (n.hit || n.missed) continue;
         if (n.lane >= lanes) continue;
@@ -3175,13 +3172,15 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::vec3 target = InvLanePos(n.lane);
         glm::vec3 start  = target;
-        start.x -= INV_SCROLL_DIR[n.lane] * scrollDist; // viene desde el muro
+        start.x -= INV_SCROLL_DIR[n.lane] * scrollDist;
         float a = glm::clamp(1.0f - (tToHit / lookAhead), 0.0f, 1.0f);
         glm::vec3 pos = glm::mix(start, target, a);
         pos.y = 0.35f;
 
         glm::vec4 c = laneColors[n.lane];
+        c.a = 0.70f; // translucido pero todavia bien visible
         SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.5f), 32);
+        phongShader->setFloat("transparency", c.a);
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, pos);
@@ -3189,6 +3188,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
+    phongShader->setFloat("transparency", 1.0f);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 
     // 3) Gotas de agua: pequenios cubos translucidos azules que caen hacia la
     //    maceta justo despues de acertar. Da la sensacion de regar.
