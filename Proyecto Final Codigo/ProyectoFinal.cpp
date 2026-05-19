@@ -1065,7 +1065,7 @@ void ChangeZone(int z) {
     // Narrativa contextual por zona (estilo recorrido guiado).
     switch (z) {
     case 0:
-        PushNarrative("HUB CENTRAL: cuatro puertas doradas conectan los modulos de la estacion.");
+        PushNarrative("HUB CENTRAL: cuatro puertas luminosas conectan los modulos de la estacion.");
         PushNarrative("Atraviesa una puerta o pulsa 1-4 para teletransportarte.");
         break;
     case 1:
@@ -1691,13 +1691,17 @@ bool Update() {
     int alphaMetal = 128;
 
 
-    // Dibuja la puerta dorada PUERTA_MODELO en el centro de la hitbox dada,
-    // con un pulso de brillo ambiental + boost cuando el jugador se acerca.
-    // Se usa tanto para las 4 puertas del HUB como para las puertas de
-    // retorno de cada zona habitable (asi todas las zonas tienen un
-    // marcador visible donde se activa el teletransporte).
-    // doorIdx se usa para leer doorOpenAmount y deslizar la puerta hacia
-    // arriba cuando el jugador la dispara (apertura tipo blast-door).
+    // Dibuja PUERTA_MODELO en el centro de la hitbox dada con un pulso
+    // de brillo ambiental + boost cuando el jugador se acerca. Se usa
+    // tanto para las 4 puertas del HUB como para las puertas de retorno
+    // de cada zona habitable, asi todas las zonas tienen un marcador
+    // visible donde se activa el teletransporte. doorIdx se usa para
+    // leer doorOpenAmount y deslizar la puerta hacia arriba cuando el
+    // jugador la dispara (apertura tipo blast-door).
+    //
+    // Tinte NEUTRO (blanco/gris): asi se respeta el color/material que
+    // trae la puerta del FBX (anteriormente tinte dorado calido que
+    // sobreescribia el look del modelo).
     auto DrawZoneDoor = [&](int doorIdx, const ZoneDoor& d, float doorYaw) {
         if (!PUERTA_MODELO) return;
         float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
@@ -1709,9 +1713,9 @@ bool Update() {
         float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
         float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
 
-        glm::vec4 doorAmb  = glm::vec4(0.25f, 0.20f, 0.08f, 1.0f) * pulse;
-        glm::vec4 doorDiff = glm::vec4(0.95f, 0.78f, 0.30f, 1.0f) * pulse;
-        glm::vec4 doorSpec = glm::vec4(0.60f, 0.55f, 0.30f, 1.0f);
+        glm::vec4 doorAmb  = glm::vec4(0.18f, 0.18f, 0.20f, 1.0f) * pulse;
+        glm::vec4 doorDiff = glm::vec4(0.90f, 0.92f, 0.95f, 1.0f) * pulse;
+        glm::vec4 doorSpec = glm::vec4(0.45f, 0.45f, 0.50f, 1.0f);
         phongShader->use();
         SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
 
@@ -2449,7 +2453,7 @@ static std::vector<std::string> BuildHelpLines() {
     if (d <= DIFF_EASY) {
         out.push_back("WASD para moverte  |  Shift correr  |  Espacio saltar");
         out.push_back("ESC abre el menu  |  TAB oculta el mapa");
-        out.push_back("Camina a una puerta dorada para teletransportarte");
+        out.push_back("Camina a una puerta luminosa para teletransportarte");
     }
 
     switch (currentZone) {
@@ -2476,7 +2480,7 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY) out.push_back("Llega a Nivel 3 para estabilizar el reactor (Energia al 100%)");
         break;
     case 4: // CAPSULAS
-        if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta dorada");
+        if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta luminosa");
         break;
     }
 
@@ -2495,7 +2499,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
     out.push_back("WASD mover  |  Shift correr  |  Espacio saltar  |  ESC menu");
     const char* zoneHint = "";
     switch (currentZone) {
-        case 0: zoneHint = "HUB: camina a una puerta dorada para entrar a un modulo";          break;
+        case 0: zoneHint = "HUB: camina a una puerta luminosa para entrar a un modulo";        break;
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
         case 2: zoneHint = "RECICLAJE: B inicia  |  F clasifica el item mas cercano";          break;
         case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
