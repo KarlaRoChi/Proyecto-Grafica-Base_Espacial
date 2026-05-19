@@ -3572,48 +3572,10 @@ void EspectroChaseCam(glm::vec3& eye, glm::vec3& target) {
     target = meteor + fwd * 1.5f;
 }
 
-void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
-    // El meteorito se dibuja en case 1 (INVERNADERO) usando proceduralShader.
-    // Aqui dibujamos un halo orbital alrededor del meteoro con el color de
-    // la linea objetivo de la ronda actual (pista visual en 3D) y otro halo
-    // mas brillante con el color seleccionado por el jugador para que el
-    // contraste delate visualmente la calidad del intento.
-    if (!CAJA_MODELO) return;
-    float t = (float)glfwGetTime();
-    glm::vec3 mpos = EspectroMeteorPos(t);
-
-    phongShader->use();
-    phongShader->setMat4("projection", projection);
-    phongShader->setMat4("view", view);
-
-    int targetIdx = gEspectro.targetLine;
-    int selIdx    = gEspectro.currentColor;
-
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-    for (int i = 0; i < 4; ++i) {
-        float ang = t * 0.8f + i * glm::radians(90.0f);
-        glm::vec3 pos = mpos + glm::vec3(cosf(ang) * 1.8f, sinf(ang) * 0.6f,
-                                          sinf(ang) * 1.8f);
-        glm::vec4 c = ESPECTRO_COLORS[i];
-        bool isTarget = (i == targetIdx);
-        bool isSel    = (gEspectro.stopped && i == selIdx);
-        float boost   = (isTarget || isSel) ? 2.0f : 0.4f;
-        c.a           = (isTarget || isSel) ? 0.95f : 0.30f;
-        SetMaterial(phongShader, c * 0.5f, c * boost, glm::vec4(0.8f), 16);
-        phongShader->setFloat("transparency", c.a);
-
-        glm::mat4 m(1.0f);
-        m = glm::translate(m, pos);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::rotate(m, ang, glm::vec3(0.0f, 0.0f, 1.0f));
-        float scale = 0.40f + (isTarget ? 0.20f : 0.0f) + (isSel ? 0.15f : 0.0f);
-        m = glm::scale(m, glm::vec3(scale));
-        phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
-    }
-    phongShader->setFloat("transparency", 1.0f);
-    glDisable(GL_BLEND);
+void DrawEspectroGame(const glm::mat4& /*projection*/, const glm::mat4& /*view*/) {
+    // Sin halo 3D alrededor del meteoro: el feedback de la ronda vive entero
+    // en el HUD (barra del espectro) y en el tinte del propio cometa, asi la
+    // escena no se llena de cajas flotantes que distraen del cielo.
 }
 
 // Aproximacion sencilla de longitud de onda visible a RGB. Sirve para pintar
@@ -3693,32 +3655,49 @@ void DrawEspectroHUD() {
                    glm::vec4(rgb * 0.85f, 1.0f));
     }
 
-    // Sweet spot: rectangulo blanco translucido centrado en la linea objetivo.
+    // Sweet spot: toda la zona valida se pinta como un rectangulo blanco
+    // translucido (sin bordes laterales). Pulsamos suavemente la opacidad
+    // para que la zona "respire" y se distinga del resto del espectro sin
+    // tapar los colores de la barra.
     float spotX = barX + (gEspectro.sweetCenter - gEspectro.sweetHalf) * barW;
     float spotW = (2.0f * gEspectro.sweetHalf) * barW;
     float pulse = 0.55f + 0.20f * sinf((float)glfwGetTime() * 4.0f);
     DrawQuad2D(spotX, barY - 6.0f, spotW, barH + 12.0f,
-               glm::vec4(1.0f, 1.0f, 1.0f, 0.18f * pulse));
-    // Bordes brillantes del sweet spot
-    DrawQuad2D(spotX,             barY - 6.0f, 2.0f, barH + 12.0f,
-               glm::vec4(1.0f, 1.0f, 1.0f, 0.85f));
-    DrawQuad2D(spotX + spotW - 2.0f, barY - 6.0f, 2.0f, barH + 12.0f,
-               glm::vec4(1.0f, 1.0f, 1.0f, 0.85f));
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.42f * pulse));
 
-    // Lineas de la serie de Balmer dibujadas sobre la barra como rayas
-    // brillantes de 2 px (asi parece un espectro de emision de hidrogeno).
+    // Lineas de la serie de Balmer. La linea objetivo de la ronda actual se
+    // dibuja mas ancha, mas opaca y con un halo blanco para que el jugador
+    // identifique de un vistazo donde tiene que pegarle.
     for (int i = 0; i < 4; ++i) {
         float lp = EspectroLinePos(i);
         float lx = barX + lp * barW;
         glm::vec4 lc = ESPECTRO_COLORS[i];
-        DrawQuad2D(lx - 1.0f, barY - 4.0f, 2.5f, barH + 8.0f,
-                   glm::vec4(lc.r, lc.g, lc.b, 0.95f));
+        bool isTarget = (i == gEspectro.targetLine);
+
+        if (isTarget) {
+            // Halo blanco amplio alrededor de la linea objetivo
+            float haloPulse = 0.65f + 0.25f * sinf((float)glfwGetTime() * 5.0f);
+            DrawQuad2D(lx - 7.0f, barY - 8.0f, 14.0f, barH + 16.0f,
+                       glm::vec4(1.0f, 1.0f, 1.0f, 0.35f * haloPulse));
+            // Linea principal mas gruesa y mas saturada
+            DrawQuad2D(lx - 2.5f, barY - 8.0f, 5.0f, barH + 16.0f,
+                       glm::vec4(glm::min(lc.r * 1.6f, 1.0f),
+                                 glm::min(lc.g * 1.6f, 1.0f),
+                                 glm::min(lc.b * 1.6f, 1.0f),
+                                 1.0f));
+        } else {
+            DrawQuad2D(lx - 1.0f, barY - 4.0f, 2.5f, barH + 8.0f,
+                       glm::vec4(lc.r, lc.g, lc.b, 0.95f));
+        }
+
         if (gText && gText->ready) {
-            float scale = 0.32f;
+            float scale = isTarget ? 0.40f : 0.32f;
             float w = gText->MeasureWidth(ESPECTRO_NAMES[i], scale);
+            glm::vec3 textCol = isTarget
+                ? glm::vec3(1.0f, 1.0f, 1.0f)
+                : glm::vec3(lc.r, lc.g, lc.b) * 1.1f;
             gText->RenderText(ESPECTRO_NAMES[i], lx - w * 0.5f,
-                              barY + barH + 8.0f, scale,
-                              glm::vec3(lc.r, lc.g, lc.b) * 1.1f);
+                              barY + barH + 8.0f, scale, textCol);
         }
     }
 
