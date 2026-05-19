@@ -1174,7 +1174,7 @@ glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
         // Centro ajustado al medio de las dos filas de macetas (z = -11).
         glm::vec3 center(0.0f, 0.0f, -11.0f);
-        glm::vec3 eye(0.0f, 16.0f, -10.99f);
+        glm::vec3 eye(0.0f, 10.0f, -10.99f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
