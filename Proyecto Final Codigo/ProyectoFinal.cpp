@@ -2955,15 +2955,17 @@ void InitInvernaderoGame() {
     for (int i = 0; i < 4; i++) gInvernadero.waterEffect[i] = 0.0f;
 
     // Parametros segun dificultad. En FACIL usamos solo 2 macetas (carriles
-    // 0 y 1), en MEDIO y EXPERTO los 4 carriles disponibles.
+    // 0 y 1), en MEDIO y EXPERTO los 4 carriles disponibles. El spacing
+    // controla cada cuanto cae una nota; FACIL muy espaciado (lento),
+    // EXPERTO un poco mas apretado (rapido).
     int    totalNotes;
     float  spacing;          // separacion media entre notas (s)
     int    numLanes;
     switch (gInvernadero.difficulty) {
-    case DIFF_EASY:   totalNotes = 16; spacing = 1.4f; numLanes = 2; break;
-    case DIFF_MEDIUM: totalNotes = 30; spacing = 0.9f; numLanes = 4; break;
-    case DIFF_EXPERT: totalNotes = 45; spacing = 0.55f; numLanes = 4; break;
-    default:          totalNotes = 16; spacing = 1.4f; numLanes = 2; break;
+    case DIFF_EASY:   totalNotes = 14; spacing = 1.9f;  numLanes = 2; break;
+    case DIFF_MEDIUM: totalNotes = 30; spacing = 0.9f;  numLanes = 4; break;
+    case DIFF_EXPERT: totalNotes = 48; spacing = 0.48f; numLanes = 4; break;
+    default:          totalNotes = 14; spacing = 1.9f;  numLanes = 2; break;
     }
     gInvernadero.activeLanes = numLanes;
 
@@ -3092,7 +3094,7 @@ void UpdateInvernaderoGame(float dt) {
 }
 
 void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CUBO_MODELO || !PLANO_MODELO) return;
+    if (!CUBO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
@@ -3110,44 +3112,24 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     if (lanes < 2) lanes = 2;
     if (lanes > 4) lanes = 4;
 
-    // 1) Marcador plano sobre cada maceta ACTIVA para indicar donde caera la
-    //    nota. Usa PLANO_MODELO con blend para que se vea translucido sobre
-    //    el suelo del invernadero.
-    // En FACIL las macetas se ven mas pequenias para coincidir con las
-    // macetas reales del modelo (que tambien son chicas).
-    float laneSizeBase = (lanes == 2) ? 0.55f : 0.85f;
-    float laneCylSize  = (lanes == 2) ? 0.70f : 1.10f;
+    // 1) Guia translucida de color sobre cada maceta ACTIVA. Solo color
+    //    (sin textura del modelo) para que sea limpia y solo guie al
+    //    jugador hacia la maceta correcta. Cubo bajo y ancho a la altura
+    //    de la maceta.
+    float laneCylSize = (lanes == 2) ? 0.70f : 1.10f;
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = InvLanePos(i);
-        base.y = 0.02f;
-        float pulse = 0.55f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
-        float waterBoost = gInvernadero.waterEffect[i];
-        glm::vec4 c = laneColors[i] * (pulse + waterBoost * 1.5f);
-        c.a = 0.55f + waterBoost * 0.35f;
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.4f), 32);
-        phongShader->setFloat("transparency", c.a);
-
-        glm::mat4 m(1.0f);
-        m = glm::translate(m, base);
-        float s = laneSizeBase + waterBoost * 0.5f;
-        m = glm::scale(m, glm::vec3(s, 1.0f, s));
-        phongShader->setMat4("model", m);
-        PLANO_MODELO->Draw(*phongShader);
-    }
-
-    // 1b) Capa de transparencia de color encima de las macetas activas: un
-    //     cilindro semi-translucido (mas tenue que el plano) que tine el
-    //     volumen de la maceta sin ocultarla.
-    for (int i = 0; i < lanes; i++) {
-        glm::vec3 base = InvLanePos(i);
         base.y = 0.4f;
         float pulse = 0.50f + 0.25f * sinf(gInvernadero.gameTime * 1.8f + i);
+        float waterBoost = gInvernadero.waterEffect[i];
         glm::vec4 c = laneColors[i];
-        c.a = 0.30f + 0.15f * pulse + gInvernadero.waterEffect[i] * 0.30f;
-        SetMaterial(phongShader, c * 0.5f, c, glm::vec4(0.2f), 16);
+        c.a = 0.30f + 0.15f * pulse + waterBoost * 0.30f;
+        // Ambient alto y diffuse igual al color para que el cubo se vea
+        // como un color plano translucido (no se modula con la textura).
+        SetMaterial(phongShader, c, c, glm::vec4(0.0f), 1);
         phongShader->setFloat("transparency", c.a);
 
         glm::mat4 m(1.0f);
@@ -3161,7 +3143,16 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     //    desde el muro exterior de su fila. Aparecen lookAhead segundos
     //    antes y desaparecen 0.4 s despues del hitTime. Translucidos para
     //    que coincidan con el estilo de los marcadores.
-    float lookAhead = 2.0f;
+    //    lookAhead depende de la dificultad para regular la velocidad
+    //    visual de las notas: en FACIL viajan mas despacio, en EXPERTO
+    //    un poco mas rapido que en MEDIO.
+    float lookAhead;
+    switch (gInvernadero.difficulty) {
+    case DIFF_EASY:   lookAhead = 2.8f; break;
+    case DIFF_MEDIUM: lookAhead = 2.0f; break;
+    case DIFF_EXPERT: lookAhead = 1.7f; break;
+    default:          lookAhead = 2.0f; break;
+    }
     float scrollDist = 5.5f;
     for (auto& n : gInvernadero.notes) {
         if (n.hit || n.missed) continue;
@@ -3179,7 +3170,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::vec4 c = laneColors[n.lane];
         c.a = 0.70f; // translucido pero todavia bien visible
-        SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.5f), 32);
+        // Color plano: ambient=diffuse=color, sin specular para que no se
+        // vea la textura del modelo ni reflejos, solo un color limpio.
+        SetMaterial(phongShader, c, c, glm::vec4(0.0f), 1);
         phongShader->setFloat("transparency", c.a);
 
         glm::mat4 m(1.0f);
@@ -3192,22 +3185,36 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
-    // 3) Gotas de agua: pequenios cubos translucidos azules que caen hacia la
-    //    maceta justo despues de acertar. Da la sensacion de regar.
+    // 3) Gotas de agua animadas: pequenios cubos azul agua que caen hacia
+    //    la maceta justo despues de acertar, con ondeo lateral y brillo
+    //    para que se sienta liquido. El color y la transparencia varian
+    //    con la vida de la gota para un fade-out natural.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
     for (const WaterDrop& d : gInvernadero.drops) {
-        glm::vec4 c(0.45f, 0.75f, 1.0f, glm::clamp(d.life, 0.0f, 1.0f));
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.9f, 0.9f, 1.0f, 1.0f), 64);
+        // Azul agua mas saturado y un toque de cian para verse "fresco".
+        float lifeT = glm::clamp(d.life / 1.4f, 0.0f, 1.0f);
+        glm::vec4 c(0.20f + 0.10f * lifeT,
+                    0.55f + 0.15f * lifeT,
+                    0.95f,
+                    glm::clamp(d.life * 0.9f, 0.0f, 0.85f));
+        // Color plano sin textura, leve specular blanco para brillo de agua.
+        SetMaterial(phongShader, c, c, glm::vec4(0.8f, 0.9f, 1.0f, 1.0f), 64);
         phongShader->setFloat("transparency", c.a);
 
+        // Ondeo lateral suave: cada gota se mece segun su posicion y vida.
+        float wobble = sinf(gInvernadero.gameTime * 6.0f + d.pos.x * 3.0f + d.pos.z * 2.0f) * 0.06f;
+        float stretch = 0.18f + (1.0f - lifeT) * 0.10f; // se alarga al caer
+
         glm::mat4 m(1.0f);
-        m = glm::translate(m, d.pos);
-        m = glm::scale(m, glm::vec3(0.12f, 0.18f, 0.12f));
+        m = glm::translate(m, d.pos + glm::vec3(wobble, 0.0f, wobble * 0.5f));
+        m = glm::scale(m, glm::vec3(0.10f, stretch, 0.10f));
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
     phongShader->setFloat("transparency", 1.0f);
+    glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 }
 
