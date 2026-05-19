@@ -904,13 +904,15 @@ void InitDoors() {
     zoneDoors[3] = { glm::vec3(-4.5f, 0.0f,  0.0f), 0.9f, 0, 4 };
 
     // ---- 4 puertas de retorno al HUB desde cada zona ----
-    // Las pegamos casi a ras de la pared interna de cada modulo para que el
-    // jugador no se quede atrapado caminando hacia ella; antes estaban ~0.5 m
-    // separadas y se veian flotando dentro de la habitacion.
-    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.15f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
-    zoneDoors[5] = { glm::vec3( 6.15f, 0.0f, 0.0f),  0.9f, 2, 0 }; // RECICLAJE -> HUB
-    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  6.65f), 0.9f, 3, 0 }; // ENERGIA -> HUB
-    zoneDoors[7] = { glm::vec3(-6.65f, 0.0f, 0.0f),  0.9f, 4, 0 }; // CAPSULAS -> HUB
+    // Pegadas a ras de la pared interna de cada modulo (solo 0.05 m dentro
+    // del cuarto) para que se vean practicamente clavadas sobre la pared.
+    // Limites de las habitaciones: INV boundsMax.y=-5, REC boundsMin.x=6,
+    // ENE boundsMin.y=6.5, CAP boundsMax.x=-6.5. El radio del hitbox (0.9)
+    // sigue cubriendo al jugador aunque la pared lo bloquee a ~0.4 m.
+    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.05f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
+    zoneDoors[5] = { glm::vec3( 6.05f, 0.0f, 0.0f),  0.9f, 2, 0 }; // RECICLAJE -> HUB
+    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  6.55f), 0.9f, 3, 0 }; // ENERGIA -> HUB
+    zoneDoors[7] = { glm::vec3(-6.55f, 0.0f, 0.0f),  0.9f, 4, 0 }; // CAPSULAS -> HUB
 }
 
 static bool PlayerInsideDoor(const ZoneDoor& d) {
