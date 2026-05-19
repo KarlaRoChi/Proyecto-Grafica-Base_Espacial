@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <stdlib.h>
+#include <ctime>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -70,7 +71,11 @@ void InvernaderoHit(int lane);
 void InitEspectroGame();
 void UpdateEspectroGame(float dt);
 void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawEspectroHUD();
 void EspectroSetColor(int spectralIdx);
+static void EspectroStopBar();
+static void EspectroNextRound();
+static float EspectroLinePos(int idx);
 // Posicion del meteorito y chase cam que lo sigue por su orbita. Se
 // declaran aqui porque ComputeView (definida antes) los usa cuando el
 // minijuego de espectrografia esta activo.
@@ -456,29 +461,41 @@ struct ReciclajeGame {
 };
 
 // --- Espectrografia del meteorito (segundo minijuego del invernadero) ---
-// El meteorito recorre una orbita circular sobre el domo. Cada cierto
-// intervalo aparece una "linea espectral objetivo" (H-alpha, H-beta,
-// H-gamma o Na/Sun) y el jugador debe cambiar el color del meteorito con
-// la tecla correspondiente antes de que se cumpla el beat.
-//   - H-alpha  (656 nm) -> tecla 1 -> rojo
-//   - H-beta   (486 nm) -> tecla 2 -> cyan
-//   - H-gamma  (434 nm) -> tecla 3 -> violeta
-//   - Na (sun) (589 nm) -> tecla 4 -> amarillo
+// Mecanica de "punto optimo": una barra horizontal representa el espectro
+// visible (de violeta a rojo) con cuatro lineas de emision de la serie de
+// Balmer del hidrogeno marcadas encima (H-alpha, H-beta, H-gamma, H-delta).
+// Un indicador recorre la barra de izquierda a derecha y rebota; el jugador
+// pulsa SPACE para detenerlo y debe caer dentro del "sweet spot" alrededor
+// de la linea objetivo. A mayor dificultad, mas estrecho el sweet spot.
+// El meteorito adopta en pantalla el color de la linea sobre la que cayo
+// el indicador para que el feedback visual sea inmediato.
+//   - H-alpha (656 nm) -> rojo
+//   - H-beta  (486 nm) -> cyan
+//   - H-gamma (434 nm) -> violeta
+//   - H-delta (410 nm) -> violeta profundo
 struct EspectroGame {
     Difficulty difficulty = DIFF_EASY;
     bool active = false;
-    int currentColor = 0;       // color actual del meteorito (0..3)
-    std::vector<int> pattern;   // lineas objetivo en orden
-    int patternIdx = 0;         // siguiente objetivo
-    float beatInterval = 1.6f;  // tiempo entre beats
-    float beatTimer = 0.0f;     // cuenta regresiva al siguiente check
-    int score = 0;
-    int hits = 0;
-    int misses = 0;
-    int combo = 0;
+    int currentColor = 0;            // color (linea espectral) seleccionada
+
+    // Estado del indicador y del sweet spot
+    float barPos       = 0.0f;        // posicion del indicador en 0..1
+    float barSpeed     = 0.55f;       // velocidad del barrido (1/s)
+    int   barDir       = +1;          // direccion del ping-pong (+1 / -1)
+    float sweetCenter  = 0.5f;        // centro del sweet spot en 0..1
+    float sweetHalf    = 0.06f;       // semiancho del sweet spot
+    int   targetLine   = 0;           // linea espectral objetivo (0..3)
+    bool  stopped      = false;       // indicador detenido tras pulsar SPACE
+    float feedbackTimer = 0.0f;       // tiempo de pausa con resultado en pantalla
+    bool  lastHit      = false;       // el ultimo intento entro al sweet spot
+
+    int rounds   = 0;                 // total de rondas a jugar
+    int roundIdx = 0;                 // ronda actual (0-based)
+    int hits     = 0;
+    int misses   = 0;
+    int score    = 0;
+    int combo    = 0;
     int maxCombo = 0;
-    float lastFeedbackTimer = 0.0f; // glow en pantalla al acertar/fallar
-    bool lastHit = false;
 };
 
 InvernaderoGame gInvernadero;
@@ -486,15 +503,22 @@ SimonGame gEnergia;
 ReciclajeGame gReciclaje;
 EspectroGame gEspectro;
 
-// Lineas espectrales del minijuego del meteorito. Las definimos aqui para que
-// SpawnMoonTrail (mas abajo) pueda usarlas directamente sin forward-extern.
+// Lineas espectrales del minijuego del meteorito. La serie de Balmer del
+// hidrogeno tiene cuatro lineas en el visible; las usamos como objetivos del
+// "sweet spot" y como colores que toma el meteoro al detener la barra. Las
+// definimos aqui para que SpawnMoonTrail (mas abajo) tambien las pueda
+// consumir sin forward-extern.
 const glm::vec4 ESPECTRO_COLORS[4] = {
-    glm::vec4(1.00f, 0.10f, 0.18f, 1.0f), // H-alpha rojo  (656 nm)
-    glm::vec4(0.15f, 0.95f, 1.00f, 1.0f), // H-beta cyan   (486 nm)
-    glm::vec4(0.55f, 0.20f, 1.00f, 1.0f), // H-gamma violeta (434 nm)
-    glm::vec4(1.00f, 0.85f, 0.18f, 1.0f)  // Na/Sun amarillo (589 nm)
+    glm::vec4(1.00f, 0.10f, 0.18f, 1.0f), // H-alpha  (656 nm) rojo
+    glm::vec4(0.15f, 0.95f, 1.00f, 1.0f), // H-beta   (486 nm) cyan
+    glm::vec4(0.55f, 0.20f, 1.00f, 1.0f), // H-gamma  (434 nm) violeta
+    glm::vec4(0.35f, 0.10f, 1.00f, 1.0f)  // H-delta  (410 nm) violeta profundo
 };
-const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "Na/Sun" };
+const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "H-delta" };
+// Longitudes de onda (nm) usadas para situar cada linea sobre la barra del
+// espectro visible (rango 400..700 nm). La posicion en la barra es lineal en
+// nm: pos = (wl - 400) / 300.
+const float ESPECTRO_NM[4] = { 656.3f, 486.1f, 434.0f, 410.2f };
 
 // Macetas distribuidas en dos filas (izquierda y derecha del invernadero),
 // con dos macetas cada una a distinto z. Las notas no caen de arriba: viajan
@@ -1674,6 +1698,18 @@ bool Update() {
             proceduralShader->setFloat("radius", moonRadius);
             proceduralShader->setFloat("height", moonHeight);
 
+            // Cuando el minijuego de espectrografia esta activo, el meteoro
+            // se tinta con la linea espectral en la que la barra se haya
+            // detenido. Asi el color del cometa coincide con el del segmento
+            // del espectro donde el jugador presiono SPACE.
+            glm::vec4 meteorTint(1.0f);
+            if (gEspectro.active) {
+                glm::vec4 c = ESPECTRO_COLORS[gEspectro.currentColor];
+                // alpha controla cuanto sustituye al color base de la textura
+                meteorTint = glm::vec4(c.r * 1.6f, c.g * 1.6f, c.b * 1.6f, 0.85f);
+            }
+            proceduralShader->setVec4("uTint", meteorTint);
+
             MOON2->Draw(*proceduralShader);
 
             // Posici�n del cometa en el mundo
@@ -2216,9 +2252,10 @@ static std::vector<std::string> BuildHelpLines() {
         }
         break;
     case 1: // INVERNADERO
-        out.push_back("B = ritmo macetas (H J K L)  |  V = espectrografia meteorito (1 2 3 4)");
+        out.push_back("B = ritmo macetas (H J K L)  |  V = espectrografia meteorito (SPACE)");
         if (d <= DIFF_MEDIUM) out.push_back("G alterna vista cenital  |  P/O hace crecer/resetea el helecho");
-        if (d <= DIFF_EASY)   out.push_back("Espectro: 1 H-a (rojo)  2 H-b (cyan)  3 H-g (violeta)  4 Na (amarillo)");
+        if (d <= DIFF_EASY)   out.push_back("Espectro: SPACE detiene la barra sobre la linea objetivo (H-a/H-b/H-g/H-d)");
+        if (d <= DIFF_EASY)   out.push_back("Sweet spot: ancho en FACIL, mas estrecho en MEDIO/EXPERTO");
         if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
         break;
     case 2: // RECICLAJE
@@ -2327,6 +2364,7 @@ void DrawHud() {
     DrawInstructionsPanel();
     DrawZoneBanner();
     DrawNarrativePanel();
+    if (gEspectro.active) DrawEspectroHUD();
 }
 
 // ============ INPUT & CONTROLES ============
@@ -2451,8 +2489,9 @@ void processInput(GLFWwindow* window) {
     keyF8Last = f8;
 
     // 3. Controles universales: Teletransporte a Zonas. Durante el minijuego
-    // de espectrografia las teclas 1..4 sirven como teclas de color, asi que
-    // dejamos solo el 0 (regreso al HUB) habilitado.
+    // de espectrografia bloqueamos 1..4 para que el jugador no salga sin
+    // querer con la camara aun encadenada al meteoro; el 0 (regreso al HUB)
+    // queda habilitado como escape rapido y TAB cierra el minijuego.
     int zoneKeys[5] = { GLFW_KEY_0,    GLFW_KEY_1,    GLFW_KEY_2,    GLFW_KEY_3,    GLFW_KEY_4 };
     int zoneKeysKP[5] = { GLFW_KEY_KP_0, GLFW_KEY_KP_1, GLFW_KEY_KP_2, GLFW_KEY_KP_3, GLFW_KEY_KP_4 };
 
@@ -2580,9 +2619,11 @@ void processInput(GLFWwindow* window) {
         hLast = hKey; jLast = jKey; kLast = kKey; lLast = lKey;
 
         // --- Minijuego ESPECTROGRAFIA ---
-        // V = iniciar/reiniciar el desafio de espectro. La camara se bloquea
-        //     siguiendo la trayectoria del meteorito y el jugador cambia el
-        //     color con 1=H-alpha 2=H-beta 3=H-gamma 4=Na/Sun.
+        // V = iniciar/reiniciar el desafio. Aparece una barra horizontal con
+        //     el espectro visible y las cuatro lineas de la serie de Balmer.
+        //     Un indicador la recorre; el jugador pulsa SPACE para detenerlo
+        //     dentro del "sweet spot" sobre la linea objetivo. La dificultad
+        //     controla el ancho de la zona valida.
         // TAB = interrumpir.
         static bool vLast = false;
         bool vKey = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
@@ -2596,24 +2637,22 @@ void processInput(GLFWwindow* window) {
                 gCamModeBeforeLock = cameraMode;
                 gMinigameCamLocked = true;
             }
-            PushNarrative("ESPECTROGRAFIA: pulsa 1 (H-a) 2 (H-b) 3 (H-g) 4 (Na) al ritmo del meteorito.");
+            PushNarrative("ESPECTROGRAFIA: pulsa SPACE para detener la barra sobre la linea objetivo.");
         }
         vLast = vKey;
 
         if (gEspectro.active) {
-            // Cambio de color por teclas 1..4. Reusamos las teclas numericas
-            // porque las de zona (1..4) tienen flanco propio y solo se
-            // disparan cuando esta zona ya esta activa, no hay conflicto.
-            static bool e1Last=false, e2Last=false, e3Last=false, e4Last=false;
-            bool e1 = glfwGetKey(window, GLFW_KEY_1) == GLFW_PRESS;
-            bool e2 = glfwGetKey(window, GLFW_KEY_2) == GLFW_PRESS;
-            bool e3 = glfwGetKey(window, GLFW_KEY_3) == GLFW_PRESS;
-            bool e4 = glfwGetKey(window, GLFW_KEY_4) == GLFW_PRESS;
-            if (e1 && !e1Last) EspectroSetColor(0);
-            if (e2 && !e2Last) EspectroSetColor(1);
-            if (e3 && !e3Last) EspectroSetColor(2);
-            if (e4 && !e4Last) EspectroSetColor(3);
-            e1Last = e1; e2Last = e2; e3Last = e3; e4Last = e4;
+            // SPACE detiene el indicador. Solo aceptamos la pulsacion si la
+            // ronda esta en curso (no en pausa de feedback ni terminada).
+            static bool eSpaceLast = false;
+            bool spaceNow = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
+            if (spaceNow && !eSpaceLast
+                && !gEspectro.stopped
+                && gEspectro.feedbackTimer <= 0.0f
+                && gEspectro.roundIdx < gEspectro.rounds) {
+                EspectroStopBar();
+            }
+            eSpaceLast = spaceNow;
 
             // TAB interrumpe el espectro
             static bool tabIntEsp = false;
@@ -2827,7 +2866,13 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
 void SetCurrentZoneDifficulty(Difficulty d) {
     const char* difLbl[3] = { "FACIL", "MEDIO", "EXPERTO" };
     switch (currentZone) {
-    case 1: gInvernadero.difficulty = d; break;
+    case 1:
+        gInvernadero.difficulty = d;
+        // El invernadero hospeda dos minijuegos. La espectrografia tambien
+        // depende de la dificultad de la zona porque el sweet spot cambia
+        // de ancho con ella, asi que la sincronizamos aqui.
+        gEspectro.difficulty = d;
+        break;
     case 2: gReciclaje.difficulty   = d; break;
     case 3: gEnergia.difficulty     = d; break;
     default: return;
@@ -3330,80 +3375,166 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
 // espectrales mas comunes en astronomia. ESPECTRO_COLORS/NAMES estan
 // declarados arriba para que SpawnMoonTrail pueda usarlos.
 
-void InitEspectroGame() {
-    gEspectro.pattern.clear();
-    gEspectro.patternIdx = 0;
-    gEspectro.currentColor = 0;
-    gEspectro.score = 0;
-    gEspectro.hits = 0;
-    gEspectro.misses = 0;
-    gEspectro.combo = 0;
-    gEspectro.maxCombo = 0;
-    gEspectro.lastFeedbackTimer = 0.0f;
-
-    int totalBeats;
-    switch (gEspectro.difficulty) {
-    case DIFF_EASY:   totalBeats = 10; gEspectro.beatInterval = 2.0f; break;
-    case DIFF_MEDIUM: totalBeats = 15; gEspectro.beatInterval = 1.3f; break;
-    case DIFF_EXPERT: totalBeats = 22; gEspectro.beatInterval = 0.85f; break;
-    default:          totalBeats = 10; gEspectro.beatInterval = 2.0f; break;
-    }
-    gEspectro.beatTimer = gEspectro.beatInterval + 1.0f; // pequeno preview
-
-    srand(98765);
-    int last = -1;
-    for (int i = 0; i < totalBeats; ++i) {
-        int v;
-        do { v = rand() % 4; } while (v == last);
-        gEspectro.pattern.push_back(v);
-        last = v;
-    }
+// Posicion en la barra (0..1) de una linea espectral concreta. La barra
+// representa el espectro visible 400..700 nm con escala lineal en nm.
+static float EspectroLinePos(int idx) {
+    float wl = ESPECTRO_NM[idx];
+    return glm::clamp((wl - 400.0f) / 300.0f, 0.0f, 1.0f);
 }
 
+// Selecciona una nueva linea objetivo distinta a la anterior y reinicia el
+// indicador para que arranque desde el extremo opuesto. Asi cada ronda se
+// siente como un barrido nuevo y el jugador no puede limitarse a soltar la
+// tecla en el mismo punto del recorrido.
+static void EspectroNextRound() {
+    int prev = gEspectro.targetLine;
+    int next;
+    do { next = rand() % 4; } while (next == prev && gEspectro.roundIdx > 0);
+    gEspectro.targetLine  = next;
+    gEspectro.sweetCenter = EspectroLinePos(next);
+    gEspectro.barPos      = (gEspectro.sweetCenter > 0.5f) ? 0.0f : 1.0f;
+    gEspectro.barDir      = (gEspectro.sweetCenter > 0.5f) ? +1 : -1;
+    gEspectro.stopped     = false;
+    gEspectro.feedbackTimer = 0.0f;
+}
+
+void InitEspectroGame() {
+    gEspectro.currentColor = 0;
+    gEspectro.score        = 0;
+    gEspectro.hits         = 0;
+    gEspectro.misses       = 0;
+    gEspectro.combo        = 0;
+    gEspectro.maxCombo     = 0;
+    gEspectro.roundIdx     = 0;
+    gEspectro.stopped      = false;
+    gEspectro.feedbackTimer = 0.0f;
+    gEspectro.targetLine   = -1;
+
+    // La dificultad ajusta dos cosas: cuantas rondas hay que jugar y, sobre
+    // todo, cuanto mide el sweet spot. La velocidad del indicador tambien
+    // sube en EXPERT para que la ventana de reaccion sea mas tensa.
+    switch (gEspectro.difficulty) {
+    case DIFF_EASY:
+        gEspectro.rounds    = 5;
+        gEspectro.sweetHalf = 0.060f; // ~12% de la barra
+        gEspectro.barSpeed  = 0.45f;
+        break;
+    case DIFF_MEDIUM:
+        gEspectro.rounds    = 7;
+        gEspectro.sweetHalf = 0.035f; // ~7%
+        gEspectro.barSpeed  = 0.75f;
+        break;
+    case DIFF_EXPERT:
+        gEspectro.rounds    = 10;
+        gEspectro.sweetHalf = 0.020f; // ~4%
+        gEspectro.barSpeed  = 1.10f;
+        break;
+    default:
+        gEspectro.rounds    = 5;
+        gEspectro.sweetHalf = 0.060f;
+        gEspectro.barSpeed  = 0.45f;
+        break;
+    }
+
+    srand((unsigned)time(NULL));
+    EspectroNextRound();
+}
+
+// Compatibilidad con el resto del codigo: si algo intenta fijar el color
+// (p.ej. la estela del meteorito al spawnear), respetamos el indice. La
+// mecanica nueva escribe currentColor desde UpdateEspectroGame cuando el
+// jugador detiene la barra.
 void EspectroSetColor(int idx) {
     if (!gEspectro.active) return;
     if (idx < 0 || idx > 3) return;
     gEspectro.currentColor = idx;
 }
 
-void UpdateEspectroGame(float dt) {
-    if (gEspectro.lastFeedbackTimer > 0.0f) gEspectro.lastFeedbackTimer -= dt;
-    if (gEspectro.patternIdx >= (int)gEspectro.pattern.size()) return;
+// Detiene el indicador y evalua si cayo dentro del sweet spot. La linea
+// "donde cayo" se decide por proximidad: la que tenga su centro mas cercano
+// a la posicion final del indicador determina el color del meteoro.
+static void EspectroStopBar() {
+    if (gEspectro.stopped) return;
 
-    gEspectro.beatTimer -= dt;
-    if (gEspectro.beatTimer > 0.0f) return;
+    gEspectro.stopped = true;
 
-    int target = gEspectro.pattern[gEspectro.patternIdx];
-    bool hit = (gEspectro.currentColor == target);
-    gEspectro.lastFeedbackTimer = 0.8f;
+    int closest = 0;
+    float bestD = 999.0f;
+    for (int i = 0; i < 4; ++i) {
+        float d = std::fabs(gEspectro.barPos - EspectroLinePos(i));
+        if (d < bestD) { bestD = d; closest = i; }
+    }
+    gEspectro.currentColor = closest;
+
+    float diff = std::fabs(gEspectro.barPos - gEspectro.sweetCenter);
+    bool hit  = (diff <= gEspectro.sweetHalf);
     gEspectro.lastHit = hit;
+
     if (hit) {
         gEspectro.hits++;
         gEspectro.combo++;
         if (gEspectro.combo > gEspectro.maxCombo) gEspectro.maxCombo = gEspectro.combo;
-        gEspectro.score += 100 + gEspectro.combo * 10;
-        if (gEspectro.combo % 4 == 0) {
-            char buf[100];
-            snprintf(buf, sizeof(buf), "Espectro alineado x%d! Score %d.",
-                     gEspectro.combo, gEspectro.score);
-            PushNarrative(buf);
-        }
+        // Cuanto mas cerca del centro, mas puntos. Bonus por combo encadenado.
+        float accuracy = 1.0f - (diff / gEspectro.sweetHalf);
+        int gained = 80 + (int)(accuracy * 70.0f) + gEspectro.combo * 10;
+        gEspectro.score += gained;
+        char buf[140];
+        snprintf(buf, sizeof(buf),
+                 "%s alineada (%.0f%%). Combo x%d. +%d pts.",
+                 ESPECTRO_NAMES[gEspectro.targetLine],
+                 accuracy * 100.0f, gEspectro.combo, gained);
+        PushNarrative(buf);
     } else {
         gEspectro.combo = 0;
         gEspectro.misses++;
-        char buf[120];
-        snprintf(buf, sizeof(buf), "Linea esperada: %s. Pulsaste %s.",
-                 ESPECTRO_NAMES[target], ESPECTRO_NAMES[gEspectro.currentColor]);
+        char buf[140];
+        snprintf(buf, sizeof(buf),
+                 "Fuera del sweet spot. Caiste en %s, esperaba %s.",
+                 ESPECTRO_NAMES[closest], ESPECTRO_NAMES[gEspectro.targetLine]);
         PushNarrative(buf);
     }
-    gEspectro.patternIdx++;
-    gEspectro.beatTimer = gEspectro.beatInterval;
 
-    if (gEspectro.patternIdx >= (int)gEspectro.pattern.size()) {
-        char buf[120];
-        snprintf(buf, sizeof(buf), "Espectro completo. Aciertos %d/%d. Score %d.",
-                 gEspectro.hits, (int)gEspectro.pattern.size(), gEspectro.score);
+    // Pequena pausa para que se vea el resultado antes de pasar a la siguiente
+    // ronda. Si era la ultima ronda, mostramos el resumen y dejamos la barra
+    // congelada hasta que el jugador pulse TAB para salir.
+    gEspectro.feedbackTimer = 1.0f;
+    gEspectro.roundIdx++;
+    if (gEspectro.roundIdx >= gEspectro.rounds) {
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "Espectro completo. Aciertos %d/%d. Score %d. Combo max %d.",
+                 gEspectro.hits, gEspectro.rounds,
+                 gEspectro.score, gEspectro.maxCombo);
         PushNarrative(buf);
+    }
+}
+
+void UpdateEspectroGame(float dt) {
+    // Si terminamos todas las rondas, no movemos mas la barra.
+    if (gEspectro.roundIdx >= gEspectro.rounds) {
+        if (gEspectro.feedbackTimer > 0.0f) gEspectro.feedbackTimer -= dt;
+        return;
+    }
+
+    // Mientras se muestra el feedback de la ronda anterior, esperamos.
+    if (gEspectro.feedbackTimer > 0.0f) {
+        gEspectro.feedbackTimer -= dt;
+        if (gEspectro.feedbackTimer <= 0.0f && gEspectro.stopped) {
+            EspectroNextRound();
+        }
+        return;
+    }
+
+    // Ping-pong del indicador entre 0 y 1.
+    if (!gEspectro.stopped) {
+        gEspectro.barPos += gEspectro.barDir * gEspectro.barSpeed * dt;
+        if (gEspectro.barPos >= 1.0f) {
+            gEspectro.barPos = 1.0f;
+            gEspectro.barDir = -1;
+        } else if (gEspectro.barPos <= 0.0f) {
+            gEspectro.barPos = 0.0f;
+            gEspectro.barDir = +1;
+        }
     }
 }
 
@@ -3443,8 +3574,10 @@ void EspectroChaseCam(glm::vec3& eye, glm::vec3& target) {
 
 void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
     // El meteorito se dibuja en case 1 (INVERNADERO) usando proceduralShader.
-    // Aqui solo dibujamos los 4 indicadores espectrales orbitando junto al
-    // meteorito como "objetivos" para que el jugador identifique el target.
+    // Aqui dibujamos un halo orbital alrededor del meteoro con el color de
+    // la linea objetivo de la ronda actual (pista visual en 3D) y otro halo
+    // mas brillante con el color seleccionado por el jugador para que el
+    // contraste delate visualmente la calidad del intento.
     if (!CAJA_MODELO) return;
     float t = (float)glfwGetTime();
     glm::vec3 mpos = EspectroMeteorPos(t);
@@ -3453,9 +3586,8 @@ void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // El siguiente target del patron determina el "halo" que se muestra
-    int targetIdx = (gEspectro.patternIdx < (int)gEspectro.pattern.size())
-                    ? gEspectro.pattern[gEspectro.patternIdx] : -1;
+    int targetIdx = gEspectro.targetLine;
+    int selIdx    = gEspectro.currentColor;
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -3464,8 +3596,10 @@ void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
         glm::vec3 pos = mpos + glm::vec3(cosf(ang) * 1.8f, sinf(ang) * 0.6f,
                                           sinf(ang) * 1.8f);
         glm::vec4 c = ESPECTRO_COLORS[i];
-        float boost = (i == targetIdx) ? 2.0f : 0.6f;
-        c.a = (i == targetIdx) ? 0.95f : 0.45f;
+        bool isTarget = (i == targetIdx);
+        bool isSel    = (gEspectro.stopped && i == selIdx);
+        float boost   = (isTarget || isSel) ? 2.0f : 0.4f;
+        c.a           = (isTarget || isSel) ? 0.95f : 0.30f;
         SetMaterial(phongShader, c * 0.5f, c * boost, glm::vec4(0.8f), 16);
         phongShader->setFloat("transparency", c.a);
 
@@ -3473,10 +3607,158 @@ void DrawEspectroGame(const glm::mat4& projection, const glm::mat4& view) {
         m = glm::translate(m, pos);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::rotate(m, ang, glm::vec3(0.0f, 0.0f, 1.0f));
-        m = glm::scale(m, glm::vec3(0.45f + (i == targetIdx ? 0.20f : 0.0f)));
+        float scale = 0.40f + (isTarget ? 0.20f : 0.0f) + (isSel ? 0.15f : 0.0f);
+        m = glm::scale(m, glm::vec3(scale));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
     phongShader->setFloat("transparency", 1.0f);
     glDisable(GL_BLEND);
+}
+
+// Aproximacion sencilla de longitud de onda visible a RGB. Sirve para pintar
+// la barra como un gradiente que el jugador reconoce como espectro visible
+// (violeta -> azul -> verde -> amarillo -> naranja -> rojo). No pretende ser
+// colorimetria exacta, solo una representacion clara para el HUD.
+static glm::vec3 WavelengthToRGB(float wl) {
+    float r = 0.0f, g = 0.0f, b = 0.0f;
+    if (wl >= 380.0f && wl < 440.0f) {
+        r = -(wl - 440.0f) / (440.0f - 380.0f);
+        g = 0.0f;
+        b = 1.0f;
+    } else if (wl < 490.0f) {
+        r = 0.0f;
+        g = (wl - 440.0f) / (490.0f - 440.0f);
+        b = 1.0f;
+    } else if (wl < 510.0f) {
+        r = 0.0f;
+        g = 1.0f;
+        b = -(wl - 510.0f) / (510.0f - 490.0f);
+    } else if (wl < 580.0f) {
+        r = (wl - 510.0f) / (580.0f - 510.0f);
+        g = 1.0f;
+        b = 0.0f;
+    } else if (wl < 645.0f) {
+        r = 1.0f;
+        g = -(wl - 645.0f) / (645.0f - 580.0f);
+        b = 0.0f;
+    } else if (wl <= 780.0f) {
+        r = 1.0f;
+        g = 0.0f;
+        b = 0.0f;
+    }
+    // Atenua los extremos del visible que el ojo casi no detecta.
+    float factor = 1.0f;
+    if (wl < 420.0f)      factor = 0.3f + 0.7f * (wl - 380.0f) / 40.0f;
+    else if (wl > 700.0f) factor = 0.3f + 0.7f * (780.0f - wl) / 80.0f;
+    factor = glm::clamp(factor, 0.0f, 1.0f);
+    return glm::vec3(r, g, b) * factor;
+}
+
+// Barra del espectro visible con las cuatro lineas del hidrogeno, el sweet
+// spot resaltado y el indicador moviendose en ping-pong. Se dibuja en la
+// franja superior central de la pantalla durante el minijuego de espectro.
+void DrawEspectroHUD() {
+    if (!hudShader) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Geometria de la barra
+    float barW = 720.0f;
+    if (barW > (float)SCR_WIDTH - 80.0f) barW = (float)SCR_WIDTH - 80.0f;
+    float barH = 56.0f;
+    float barX = (SCR_WIDTH - barW) * 0.5f;
+    float barY = (float)SCR_HEIGHT - 110.0f;
+
+    // Marco / fondo oscuro
+    DrawQuad2D(barX - 8.0f, barY - 28.0f, barW + 16.0f, barH + 64.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(barX - 8.0f, barY + barH + 33.0f, barW + 16.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(barX - 8.0f, barY - 28.0f, barW + 16.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Gradiente del espectro: 60 segmentos pintados por longitud de onda.
+    const int N = 60;
+    float segW = barW / (float)N;
+    for (int i = 0; i < N; ++i) {
+        float u = (i + 0.5f) / (float)N;
+        float wl = 400.0f + u * 300.0f;
+        glm::vec3 rgb = WavelengthToRGB(wl);
+        // Atenuamos un poco para simular un fondo tipo espectro continuo,
+        // sobre el cual las lineas de hidrogeno destacan brillantes.
+        DrawQuad2D(barX + i * segW, barY, segW + 0.5f, barH,
+                   glm::vec4(rgb * 0.85f, 1.0f));
+    }
+
+    // Sweet spot: rectangulo blanco translucido centrado en la linea objetivo.
+    float spotX = barX + (gEspectro.sweetCenter - gEspectro.sweetHalf) * barW;
+    float spotW = (2.0f * gEspectro.sweetHalf) * barW;
+    float pulse = 0.55f + 0.20f * sinf((float)glfwGetTime() * 4.0f);
+    DrawQuad2D(spotX, barY - 6.0f, spotW, barH + 12.0f,
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.18f * pulse));
+    // Bordes brillantes del sweet spot
+    DrawQuad2D(spotX,             barY - 6.0f, 2.0f, barH + 12.0f,
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.85f));
+    DrawQuad2D(spotX + spotW - 2.0f, barY - 6.0f, 2.0f, barH + 12.0f,
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.85f));
+
+    // Lineas de la serie de Balmer dibujadas sobre la barra como rayas
+    // brillantes de 2 px (asi parece un espectro de emision de hidrogeno).
+    for (int i = 0; i < 4; ++i) {
+        float lp = EspectroLinePos(i);
+        float lx = barX + lp * barW;
+        glm::vec4 lc = ESPECTRO_COLORS[i];
+        DrawQuad2D(lx - 1.0f, barY - 4.0f, 2.5f, barH + 8.0f,
+                   glm::vec4(lc.r, lc.g, lc.b, 0.95f));
+        if (gText && gText->ready) {
+            float scale = 0.32f;
+            float w = gText->MeasureWidth(ESPECTRO_NAMES[i], scale);
+            gText->RenderText(ESPECTRO_NAMES[i], lx - w * 0.5f,
+                              barY + barH + 8.0f, scale,
+                              glm::vec3(lc.r, lc.g, lc.b) * 1.1f);
+        }
+    }
+
+    // Indicador del jugador: barra vertical fina con halo.
+    float indX = barX + gEspectro.barPos * barW;
+    glm::vec4 indCol = gEspectro.stopped
+        ? (gEspectro.lastHit ? glm::vec4(0.30f, 1.00f, 0.45f, 1.0f)
+                              : glm::vec4(1.00f, 0.35f, 0.30f, 1.0f))
+        : glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+    DrawQuad2D(indX - 6.0f, barY - 10.0f, 12.0f, barH + 20.0f,
+               glm::vec4(indCol.r, indCol.g, indCol.b, 0.25f));
+    DrawQuad2D(indX - 2.0f, barY - 10.0f, 4.0f, barH + 20.0f, indCol);
+
+    // Texto: ronda actual, objetivo y puntuacion arriba de la barra; pista
+    // de teclas debajo. Asi el jugador entiende el estado sin abrir la guia.
+    if (gText && gText->ready) {
+        char buf[160];
+        if (gEspectro.roundIdx >= gEspectro.rounds) {
+            snprintf(buf, sizeof(buf), "FIN  -  Aciertos %d/%d  -  Score %d",
+                     gEspectro.hits, gEspectro.rounds, gEspectro.score);
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "Ronda %d/%d   Objetivo: %s   Score %d   Combo %d",
+                     gEspectro.roundIdx + 1, gEspectro.rounds,
+                     ESPECTRO_NAMES[gEspectro.targetLine],
+                     gEspectro.score, gEspectro.combo);
+        }
+        float scale = 0.42f;
+        float w = gText->MeasureWidth(buf, scale);
+        gText->RenderText(buf, (SCR_WIDTH - w) * 0.5f, barY - 22.0f,
+                          scale, glm::vec3(0.95f, 0.95f, 1.0f));
+
+        const char* hint = (gEspectro.roundIdx >= gEspectro.rounds)
+            ? "TAB para salir"
+            : "SPACE = detener la barra   |   TAB = salir";
+        scale = 0.32f;
+        w = gText->MeasureWidth(hint, scale);
+        gText->RenderText(hint, (SCR_WIDTH - w) * 0.5f, barY + barH + 38.0f,
+                          scale, glm::vec3(0.70f, 0.78f, 0.92f));
+    }
+
+    glEnable(GL_DEPTH_TEST);
 }
