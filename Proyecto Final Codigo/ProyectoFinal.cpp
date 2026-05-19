@@ -1699,25 +1699,29 @@ bool Update() {
     // leer doorOpenAmount y deslizar la puerta hacia arriba cuando el
     // jugador la dispara (apertura tipo blast-door).
     //
-    // Tinte NEUTRO (blanco/gris): asi se respeta el color/material que
-    // trae la puerta del FBX (anteriormente tinte dorado calido que
-    // sobreescribia el look del modelo).
+    // Tinte ACERO FRIO (azul-gris): la textura de la puerta es metal gris
+    // neutro pero las luces de la sala son calidas (HUB: blanco-amarillento,
+    // ENERGIA: naranja del reactor). Si dejamos el tinte blanco, esas luces
+    // lo "doran". Empujamos el material hacia frio (mas azul que rojo) para
+    // compensar y mantener una lectura clara de "puerta de metal" sin tono
+    // dorado. Tambien limitamos el pulso (max 1.3x) para que el tone mapping
+    // ACES no presione zonas brillantes hacia el ambar.
     auto DrawZoneDoor = [&](int doorIdx, const ZoneDoor& d, float doorYaw) {
         if (!PUERTA_MODELO) return;
-        float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
+        float pulseGlobal = 0.80f + 0.12f * sinf(t * 2.2f);
         float dx = player.position.x - d.center.x;
         float dz = player.position.z - d.center.z;
         float dist2 = dx * dx + dz * dz;
-        // Brillo cercano: hasta 1.7x cuando el jugador esta encima.
+        // Brillo cercano: hasta 1.3x cuando el jugador esta encima.
         // (`near`/`far` son macros de windef.h, no usar como variables)
         float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
-        float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
+        float pulse = pulseGlobal * (1.0f + proximity * 0.45f);
 
-        glm::vec4 doorAmb  = glm::vec4(0.18f, 0.18f, 0.20f, 1.0f) * pulse;
-        glm::vec4 doorDiff = glm::vec4(0.90f, 0.92f, 0.95f, 1.0f) * pulse;
-        glm::vec4 doorSpec = glm::vec4(0.45f, 0.45f, 0.50f, 1.0f);
+        glm::vec4 doorAmb  = glm::vec4(0.10f, 0.13f, 0.18f, 1.0f) * pulse;
+        glm::vec4 doorDiff = glm::vec4(0.55f, 0.62f, 0.78f, 1.0f) * pulse;
+        glm::vec4 doorSpec = glm::vec4(0.55f, 0.62f, 0.80f, 1.0f);
         phongShader->use();
-        SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
+        SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 48);
 
         // Suavizado (smoothstep) en la subida: arranque y final mas suaves
         // que un lerp lineal, da sensacion de servo mecanico.
