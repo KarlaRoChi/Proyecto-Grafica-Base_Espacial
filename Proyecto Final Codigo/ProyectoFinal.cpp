@@ -85,6 +85,7 @@ void EspectroChaseCam(glm::vec3& eye, glm::vec3& target);
 void InitEnergiaGame();
 void UpdateEnergiaGame(float dt);
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawEnergiaHUD();
 void EnergiaPress(int button);
 
 void InitReciclajeGame();
@@ -497,6 +498,13 @@ struct SimonGame {
     int showIndex = -1;
     int level = 1;
     int score = 0;
+    // Metricas del minijuego (mismo set que OSU/Espectro/Reciclaje para que
+    // el HUD pueda mostrarlas de forma consistente con los otros modulos).
+    int hits = 0;        // botones presionados correctamente en TODA la partida
+    int misses = 0;      // fallos (cada fallo es 1 miss y reinicia patron)
+    int combo = 0;       // racha de aciertos seguidos sin fallar
+    int maxCombo = 0;    // mejor racha de la partida actual
+    int bestLevel = 1;   // mejor nivel alcanzado (sobrevive a fallos hasta cerrar)
     float buttonGlow[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
@@ -608,16 +616,47 @@ static glm::vec3 InvLanePos(int lane) {
 const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 
 // La zona ENERGIA tiene 6 pilas (L_1..L_3 y R_1..R_3). El minijuego de
-// luces usa SOLO una pila para concentrar la atencion del jugador: la pila
-// central derecha (R_2) que queda visible de frente al spawn. Los 4 botones
-// del Simon estan distribuidos en una columna sobre la cara frontal de esa
-// pila para que se puedan clickear sin perdersepor el modelo.
+// luces (Simon dice) usa SOLO una pila para concentrar la atencion del
+// jugador: la pila R_1 (cara frontal contra la pared +X, fondo +Z de la
+// sala). Esa pila trae 12 botones reales del modelo distribuidos en un
+// grid 3x4 (3 filas en Y, 4 columnas en Z), todos sobre la cara x ~= 5.116.
+// Tomamos 4 botones contiguos del cuadrante superior-izquierdo del grid
+// (filas 1 y 2, columnas 0 y 1) para formar el cuadrado clasico 2x2 del
+// Simon. Encima de cada boton real dibujamos un "plano" coloreado a modo
+// de membrana de tacto (rojo / verde / azul / amarillo). Las coordenadas
+// se leyeron directamente del .obj exportado del Blender (Y-up), que
+// coincide con las coordenadas de mundo en runtime (el render del FBX
+// no aplica rotacion adicional sobre los modelos de zona).
+//
+// Layout en pantalla (camara mira +X, +Z queda a la derecha y +Y arriba):
+//   idx 0 ROJO     -> R_1_20 (top-right en pantalla)
+//   idx 1 VERDE    -> R_1_21 (top-left)
+//   idx 2 AZUL     -> R_1_10 (bot-right)
+//   idx 3 AMARILLO -> R_1_11 (bot-left)
 const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
-    glm::vec3(2.8f, 0.9f, 11.5f),   // boton inferior
-    glm::vec3(2.8f, 1.5f, 11.5f),
-    glm::vec3(2.8f, 2.1f, 11.5f),
-    glm::vec3(2.8f, 2.7f, 11.5f)    // boton superior
+    glm::vec3(5.116f, 1.50f, 12.90f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.116f, 1.50f, 12.60f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.116f, 1.10f, 12.90f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.116f, 1.10f, 12.60f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
+// Centro del cluster de 4 botones (para enfocar la camara y centrar HUD).
+const glm::vec3 SIMON_CLUSTER_CENTER = glm::vec3(5.116f, 1.30f, 12.75f);
+// Normal hacia el jugador (los botones miran +X; la membrana se separa
+// 2.2 cm hacia +X para flotar justo delante de cada boton real).
+const float SIMON_MEMBRANE_OFFSET = 0.022f;
+
+// Colores y etiquetas de los 4 botones del Simon. Globales (compartidas
+// por DrawEnergiaGame, DrawEnergiaHUD, EnergiaPress y la actualizacion de
+// luces puntuales gLights[5..8]) para que el color que ve el jugador, el
+// chip del HUD y el texto de feedback coincidan exactamente.
+static const glm::vec4 SIMON_COLORS[4] = {
+    glm::vec4(1.00f, 0.20f, 0.22f, 1.0f), // 0 rojo
+    glm::vec4(0.20f, 1.00f, 0.30f, 1.0f), // 1 verde
+    glm::vec4(0.25f, 0.55f, 1.00f, 1.0f), // 2 azul
+    glm::vec4(1.00f, 0.92f, 0.20f, 1.0f)  // 3 amarillo
+};
+static const char* SIMON_NAMES[4]    = { "ROJO", "VERDE", "AZUL", "AMARILLO" };
+static const char* SIMON_KEY_HINT[4] = { "Z", "X", "C", "V" };
 
 const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
     glm::vec3(11.5f, 0.5f, -2.5f),  // METAL
@@ -1244,18 +1283,14 @@ bool Start() {
     gLights.push_back(capsulaLight2);
 
     // [5..8] Botones Simon de la zona ENERGIA. Apagadas por defecto; los
-    // colores se actualizan cada frame en Update segun el estado del minijuego.
-    glm::vec3 simonColors[4] = {
-        glm::vec3(1.0f, 0.25f, 0.25f),
-        glm::vec3(0.25f, 1.0f, 0.30f),
-        glm::vec3(0.30f, 0.55f, 1.0f),
-        glm::vec3(1.0f, 0.95f, 0.25f)
-    };
+    // colores se actualizan cada frame en Update segun el estado del
+    // minijuego. Reutilizamos SIMON_COLORS para que la luz puntual coincida
+    // exactamente con la membrana 3D y el chip del HUD.
     for (int i = 0; i < 4; ++i) {
         Light sb;
         sb.type = 0;
         sb.Position = SIMON_BUTTON_POSITIONS[i];
-        sb.Color = glm::vec4(simonColors[i], 1.0f);
+        sb.Color = SIMON_COLORS[i];
         sb.Power = glm::vec4(0.0f);
         sb.alphaIndex = 8;
         sb.distance = 4.0f;
@@ -1294,9 +1329,13 @@ glm::mat4 ComputeView() {
         return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        // Vista fija frente a la pila R_2 (centro entre los 4 botones de esa pila)
-        glm::vec3 center(2.8f, 1.8f, 11.5f);
-        glm::vec3 eye  (2.8f, 2.0f,  8.5f);
+        // Vista fija frente a la pila R_1 (rincon +X / +Z). La camara se
+        // pone a la altura del cluster de botones y se separa ~2.5 m sobre
+        // -X para que los 4 botones queden centrados y bien grandes en
+        // pantalla, sin que el jugador necesite caminar para alinear el
+        // tiro. Target = centro del cluster, eye = mismo Y/Z, X menor.
+        glm::vec3 center = SIMON_CLUSTER_CENTER;
+        glm::vec3 eye    = SIMON_CLUSTER_CENTER + glm::vec3(-2.4f, 0.05f, 0.0f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
@@ -1357,7 +1396,7 @@ glm::vec3 ComputeEyePos() {
         return eye;
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        return glm::vec3(2.8f, 2.0f, 8.5f);
+        return SIMON_CLUSTER_CENTER + glm::vec3(-2.4f, 0.05f, 0.0f);
     }
     if (cameraMode == CAM_FREE) return camera.Position;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
@@ -2432,8 +2471,9 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY) out.push_back("Cada caja tiene un control distinto; experimenta con cada una");
         break;
     case 3: // ENERGIA
-        out.push_back("B = iniciar partida Simon  |  Z X C V = botones (en orden del patron)");
-        if (d <= DIFF_EASY) out.push_back("Memoriza la secuencia de colores y repitela");
+        out.push_back("B = iniciar Simon (la camara se fija a la pila)  |  Clic en la membrana o Z X C V");
+        if (d <= DIFF_EASY) out.push_back("Memoriza el orden de las luces sobre los botones y repitelo");
+        if (d <= DIFF_EASY) out.push_back("Llega a Nivel 3 para estabilizar el reactor (Energia al 100%)");
         break;
     case 4: // CAPSULAS
         if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta dorada");
@@ -2458,7 +2498,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
         case 0: zoneHint = "HUB: camina a una puerta dorada para entrar a un modulo";          break;
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
         case 2: zoneHint = "RECICLAJE: B inicia  |  F clasifica el item mas cercano";          break;
-        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Z X C V = botones del patron";         break;
+        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
         case 4: zoneHint = "CAPSULAS: B prepara comida (necesita plantas regadas)";            break;
     }
     out.push_back(zoneHint);
@@ -2875,7 +2915,7 @@ void DrawQuestsMenu() {
         { "Regar las plantas (Invernadero)",        "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
         { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
         { "Clasificar reciclaje (Reciclaje)",        "B inicia, F clasifica",          gStats.recycleDone },
-        { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (Z X C V)",        gStats.simonDone },
+        { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
         { "Preparar comida (Capsulas)",              "Requiere plantas regadas",       gStats.foodPrepared },
     };
 
@@ -2939,6 +2979,7 @@ void DrawHud() {
     DrawZoneBanner();
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
+    if (gEnergia.active)  DrawEnergiaHUD();
 }
 
 // ============ INPUT & CONTROLES ============
@@ -3425,9 +3466,12 @@ void processInput(GLFWwindow* window) {
         if (vKey && !keyVLast) EnergiaPress(3);
         keyZLast = zKey; keyXLast = xKey; keyCLast = cKey; keyVLast = vKey;
 
-        // CLIC DEL MOUSE: cada boton Simon se proyecta a pantalla y comparamos
-        // con la posicion del cursor. Solo aceptamos clics si el juego esta
-        // en fase 2 (turno del jugador).
+        // CLIC DEL MOUSE: cada boton Simon (membrana sobre la pila R_1) se
+        // proyecta a pantalla y comparamos con la posicion del cursor. Como
+        // la camara queda fija a ~2.4 m de la pila, las 4 membranas caen en
+        // un cuadrado de ~120 px de lado, asi que 55 px de radio cubre con
+        // holgura cada membrana sin pisar la vecina (gana la mas cercana).
+        // Solo aceptamos clics en fase 2 (turno del jugador).
         if (gEnergia.active) {
             static bool mouseLast = false;
             bool mouseNow = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
@@ -3438,7 +3482,7 @@ void processInput(GLFWwindow* window) {
                     (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
                 glm::mat4 vw = ComputeView();
                 int bestIdx = -1;
-                float bestDist = 70.0f; // radio en px
+                float bestDist = 65.0f; // radio en px
                 for (int i = 0; i < 4; ++i) {
                     glm::vec4 clip = proj * vw * glm::vec4(SIMON_BUTTON_POSITIONS[i], 1.0f);
                     if (clip.w <= 0.0f) continue;
@@ -3851,6 +3895,10 @@ void InitEnergiaGame() {
     gEnergia.phaseTimer = 0.0f;
     gEnergia.showIndex = -1;
     gEnergia.score = 0;
+    gEnergia.hits = 0;
+    gEnergia.misses = 0;
+    gEnergia.combo = 0;
+    gEnergia.maxCombo = 0;
     for (int i = 0; i < 4; i++) gEnergia.buttonGlow[i] = 0.0f;
 
     int startLen;
@@ -3860,6 +3908,7 @@ void InitEnergiaGame() {
     case DIFF_EXPERT: startLen = 6; gEnergia.level = 4; break;
     default:          startLen = 3; gEnergia.level = 1; break;
     }
+    gEnergia.bestLevel = gEnergia.level;
     srand((unsigned)(glfwGetTime() * 1000.0));
     for (int i = 0; i < startLen; i++) gEnergia.pattern.push_back(rand() % 4);
 }
@@ -3872,11 +3921,18 @@ void EnergiaPress(int button) {
     int expected = gEnergia.pattern[gEnergia.playerIndex];
     if (button == expected) {
         gEnergia.playerIndex++;
-        gEnergia.score += 50;
-        std::cout << "[Simon] OK boton " << button << "  (" << gEnergia.playerIndex
-                  << "/" << gEnergia.pattern.size() << ")" << std::endl;
+        gEnergia.hits++;
+        gEnergia.combo++;
+        if (gEnergia.combo > gEnergia.maxCombo) gEnergia.maxCombo = gEnergia.combo;
+        // Score con bonus de racha: +50 base, +5 por cada eslabon de combo.
+        gEnergia.score += 50 + gEnergia.combo * 5;
+        std::cout << "[Simon] OK boton " << SIMON_NAMES[button]
+                  << "  (" << gEnergia.playerIndex
+                  << "/" << gEnergia.pattern.size() << ")"
+                  << "  combo=" << gEnergia.combo << std::endl;
         if (gEnergia.playerIndex >= (int)gEnergia.pattern.size()) {
             gEnergia.level++;
+            if (gEnergia.level > gEnergia.bestLevel) gEnergia.bestLevel = gEnergia.level;
             gEnergia.pattern.push_back(rand() % 4);
             gEnergia.playerIndex = 0;
             gEnergia.phase = 1;            // volver a mostrar patron
@@ -3886,7 +3942,9 @@ void EnergiaPress(int button) {
             snprintf(buf, sizeof(buf), "Patron correcto! Nivel %d. Memoriza el nuevo orden.", gEnergia.level);
             PushNarrative(buf);
             std::cout << "[Simon] NIVEL " << gEnergia.level
-                      << "  Score=" << gEnergia.score << std::endl;
+                      << "  Score=" << gEnergia.score
+                      << "  Aciertos=" << gEnergia.hits
+                      << "  MaxCombo=" << gEnergia.maxCombo << std::endl;
             // El reactor de la estacion se da por estable al alcanzar nivel 3.
             // Llena la barra de energia y palomea la tarea del manual.
             if (!gStats.simonDone && gEnergia.level >= 3) {
@@ -3899,13 +3957,19 @@ void EnergiaPress(int button) {
         }
     }
     else {
-        char buf[100];
-        snprintf(buf, sizeof(buf), "Fallaste. Esperaba el boton %d. Score final %d.",
-                 expected, gEnergia.score);
+        gEnergia.misses++;
+        gEnergia.combo = 0;
+        char buf[120];
+        snprintf(buf, sizeof(buf),
+                 "Fallaste. Esperaba %s. Aciertos %d / Fallos %d / Score %d.",
+                 SIMON_NAMES[expected], gEnergia.hits, gEnergia.misses, gEnergia.score);
         PushNarrative(buf);
-        std::cout << "[Simon] FALLO. Esperaba " << expected
-                  << " y se presiono " << button
-                  << ".  Score final=" << gEnergia.score << std::endl;
+        std::cout << "[Simon] FALLO. Esperaba " << SIMON_NAMES[expected]
+                  << " y se presiono " << SIMON_NAMES[button]
+                  << ".  Score final=" << gEnergia.score
+                  << "  Hits=" << gEnergia.hits
+                  << "  Misses=" << gEnergia.misses
+                  << "  MaxCombo=" << gEnergia.maxCombo << std::endl;
         gEnergia.phase = 3;
         gEnergia.phaseTimer = 1.5f;
     }
@@ -3954,38 +4018,203 @@ void UpdateEnergiaGame(float dt) {
     }
 }
 
+// HUD del minijuego Simon. Aparece solo mientras gEnergia.active == true.
+// Mantiene el mismo estilo (panel oscuro con borde dorado + texto blanco)
+// que DrawEspectroHUD para que los 4 minijuegos se sientan parte de la
+// misma familia. Muestra: nivel actual, score, hits, fallos, combo, mejor
+// racha, fase activa y el "color objetivo" durante la fase de input.
+void DrawEnergiaHUD() {
+    if (!hudShader) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 540.0f;
+    if (panelW > (float)SCR_WIDTH - 80.0f) panelW = (float)SCR_WIDTH - 80.0f;
+    float panelH = 132.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (float)SCR_HEIGHT - panelH - 26.0f;
+
+    // Marco oscuro con borde dorado superior/inferior (igual que Espectro).
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, panelH + 12.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(panelX - 6.0f, panelY + panelH + 3.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Fila de 4 chips de color (uno por boton): se ilumina el que esta
+    // activo en la fase de "mostrar patron" y los pulsados por el jugador.
+    float chipW = 80.0f, chipH = 28.0f, chipGap = 16.0f;
+    float chipsTotal = chipW * 4.0f + chipGap * 3.0f;
+    float chipX0 = panelX + (panelW - chipsTotal) * 0.5f;
+    float chipY  = panelY + panelH - chipH - 14.0f;
+    float tNow = (float)glfwGetTime();
+    for (int i = 0; i < 4; ++i) {
+        float glow = gEnergia.buttonGlow[i];
+        float pulse = 0.55f + 0.20f * sinf(tNow * 2.2f + i * 1.3f);
+        glm::vec4 base = SIMON_COLORS[i];
+        glm::vec4 bg(base.r * (0.35f + glow * 0.65f),
+                     base.g * (0.35f + glow * 0.65f),
+                     base.b * (0.35f + glow * 0.65f),
+                     0.55f + glow * 0.40f);
+        float cx = chipX0 + i * (chipW + chipGap);
+        DrawQuad2D(cx, chipY, chipW, chipH, bg);
+        // Borde brillante cuando glow alto.
+        float edge = glm::clamp(glow * 0.9f + 0.18f * pulse, 0.0f, 1.0f);
+        DrawQuad2D(cx, chipY + chipH - 3.0f, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        DrawQuad2D(cx, chipY, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        if (gText && gText->ready) {
+            // Nombre + tecla rapida dentro del chip ("ROJO  Z").
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s %s", SIMON_NAMES[i], SIMON_KEY_HINT[i]);
+            float scale = 0.32f;
+            float w = gText->MeasureWidth(buf, scale);
+            gText->RenderText(buf, cx + (chipW - w) * 0.5f, chipY + 7.0f,
+                              scale, glm::vec3(0.98f, 0.98f, 1.00f));
+        }
+    }
+
+    if (!gText || !gText->ready) {
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    // Linea 1: nivel, score, hits/misses, combo.
+    char line1[160];
+    int patLen = (int)gEnergia.pattern.size();
+    snprintf(line1, sizeof(line1),
+             "Nivel %d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d",
+             gEnergia.level, gEnergia.score, gEnergia.hits, gEnergia.misses,
+             gEnergia.combo, gEnergia.maxCombo);
+    float s1 = 0.36f;
+    float w1 = gText->MeasureWidth(line1, s1);
+    gText->RenderText(line1, panelX + (panelW - w1) * 0.5f, panelY + 56.0f,
+                      s1, glm::vec3(0.96f, 0.96f, 1.0f));
+
+    // Linea 2: estado / pista contextual segun fase.
+    char line2[200];
+    if (gEnergia.phase == 1) {
+        int shown = gEnergia.showIndex + 1;
+        if (shown < 0) shown = 0;
+        if (shown > patLen) shown = patLen;
+        snprintf(line2, sizeof(line2),
+                 "MEMORIZA  -  Mostrando patron (%d/%d)   |   TAB para salir",
+                 shown, patLen);
+    } else if (gEnergia.phase == 2) {
+        int next = gEnergia.playerIndex;
+        const char* nextName = (next >= 0 && next < patLen)
+            ? SIMON_NAMES[gEnergia.pattern[next]] : "-";
+        snprintf(line2, sizeof(line2),
+                 "TU TURNO  -  Paso %d/%d   Pulsa %s (clic o tecla)   |   TAB para salir",
+                 next + 1, patLen, nextName);
+    } else if (gEnergia.phase == 3) {
+        snprintf(line2, sizeof(line2),
+                 "FALLO  -  Reiniciando patron... (Mejor nivel %d)", gEnergia.bestLevel);
+    } else {
+        snprintf(line2, sizeof(line2),
+                 "Pulsa B para empezar  |  TAB para salir");
+    }
+    float s2 = 0.32f;
+    float w2 = gText->MeasureWidth(line2, s2);
+    glm::vec3 stateCol = (gEnergia.phase == 3)
+        ? glm::vec3(1.00f, 0.45f, 0.40f)
+        : (gEnergia.phase == 2 ? glm::vec3(0.55f, 1.00f, 0.65f)
+                                : glm::vec3(0.75f, 0.82f, 0.96f));
+    gText->RenderText(line2, panelX + (panelW - w2) * 0.5f, panelY + 30.0f,
+                      s2, stateCol);
+
+    // Footer corto centrado: contador "boton X de N" estilo OSU.
+    if (gEnergia.phase == 2 || gEnergia.phase == 1) {
+        char line3[80];
+        snprintf(line3, sizeof(line3), "Patron actual: %d luces", patLen);
+        float s3 = 0.30f;
+        float w3 = gText->MeasureWidth(line3, s3);
+        gText->RenderText(line3, panelX + (panelW - w3) * 0.5f, panelY + 8.0f,
+                          s3, glm::vec3(0.62f, 0.70f, 0.85f));
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CUBO_MODELO) return;
+    if (!PLANO_MODELO && !CUBO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // Las pilas reales del modelo ya tienen botones; encima dibujamos un cubo
-    // de color para que el jugador identifique claramente los 4 botones del
-    // Simon y pueda hacer clic con el mouse. Cada cubo brilla con buttonGlow.
-    glm::vec4 simonColors[4] = {
-        glm::vec4(1.0f, 0.25f, 0.25f, 1.0f), // rojo
-        glm::vec4(0.25f, 1.0f, 0.30f, 1.0f), // verde
-        glm::vec4(0.30f, 0.55f, 1.0f, 1.0f), // azul
-        glm::vec4(1.0f, 0.95f, 0.25f, 1.0f)  // amarillo
-    };
-
+    // El modelo ENERGIA_OPACO ya trae los 12 botones fisicos de la pila
+    // R_1. Aqui solo pegamos encima de los 4 botones que entran al Simon
+    // una "membrana" translucida de color (modelo plano.fbx). El plano
+    // se orienta con normal +X y se separa SIMON_MEMBRANE_OFFSET m de la
+    // cara del boton para no clipear contra el FBX subyacente.
+    //
+    // buttonGlow[i] sube a 1.0 cuando el boton se enciende (mostrar
+    // patron) o cuando el jugador lo pulsa; decae 2.5/seg en Update.
+    // Mezclamos un pulso lento de "respiracion" para que las membranas
+    // sigan siendo visibles incluso cuando ningun boton esta activo.
     float t = (float)glfwGetTime();
-    // Botones del Simon como cubos limpios (sin tinte del FBX de CAJA).
-    Model* buttonModel = CUBO_MODELO;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    Model* membrane = PLANO_MODELO ? PLANO_MODELO : CUBO_MODELO;
     for (int i = 0; i < 4; ++i) {
         float glow = gEnergia.buttonGlow[i];
-        float pulse = 0.55f + 0.20f * sinf(t * 2.5f + i);
-        glm::vec4 c = simonColors[i] * (pulse + glow * 1.8f);
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.7f), 32);
+        float pulse = 0.55f + 0.18f * sinf(t * 2.2f + i * 1.3f);
 
+        // Tinte del material: brillante cuando glow=1, suave en reposo.
+        glm::vec4 base = SIMON_COLORS[i];
+        glm::vec4 diff = base * (0.55f + pulse * 0.30f + glow * 1.40f);
+        diff.a = glm::clamp(0.55f + glow * 0.45f, 0.0f, 0.95f);
+        glm::vec4 amb  = base * (0.35f + glow * 0.70f);
+        amb.a = diff.a;
+        glm::vec4 spec = glm::vec4(0.85f, 0.85f, 0.85f, 1.0f);
+        SetMaterial(phongShader, amb, diff, spec, 16);
+        phongShader->setFloat("transparency", diff.a);
+
+        // Membrana: PLANO escalado a ~9 cm cuadrados (el boton fisico
+        // mide 6x6 cm; un poco mas grande para que el color rebose y
+        // se aprecie incluso desde un angulo). Plano FBX por defecto
+        // queda en XZ con normal +Y al cargarse; rotamos -90 alrededor
+        // de Z para mandar la normal a +X y mirar al jugador.
+        float size = 0.085f + glow * 0.02f;
         glm::mat4 m(1.0f);
-        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.55f + glow * 0.20f));
+        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]
+                              + glm::vec3(SIMON_MEMBRANE_OFFSET, 0.0f, 0.0f));
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        m = glm::scale(m, glm::vec3(size, 0.005f, size));
         phongShader->setMat4("model", m);
-        buttonModel->Draw(*phongShader);
+        membrane->Draw(*phongShader);
+
+        // Halo trasero: cubo finito ligeramente mas grande que sirve de
+        // "respaldo" cuando el plano queda casi de canto y por si la
+        // orientacion del FBX de plano difiere de lo esperado. Da grosor
+        // visual y permite que el boton se vea encendido aun de perfil.
+        if (CUBO_MODELO) {
+            glm::vec4 haloDiff = base * (0.25f + glow * 1.10f);
+            haloDiff.a = glm::clamp(0.20f + glow * 0.55f, 0.0f, 0.90f);
+            glm::vec4 haloAmb = base * (0.18f + glow * 0.60f);
+            haloAmb.a = haloDiff.a;
+            SetMaterial(phongShader, haloAmb, haloDiff, glm::vec4(0.2f), 8);
+            phongShader->setFloat("transparency", haloDiff.a);
+
+            glm::mat4 hm(1.0f);
+            hm = glm::translate(hm, SIMON_BUTTON_POSITIONS[i]
+                                    + glm::vec3(SIMON_MEMBRANE_OFFSET * 0.4f, 0.0f, 0.0f));
+            hm = glm::scale(hm, glm::vec3(0.018f, size * 1.05f, size * 1.05f));
+            phongShader->setMat4("model", hm);
+            CUBO_MODELO->Draw(*phongShader);
+        }
     }
+
+    phongShader->setFloat("transparency", 1.0f);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 }
 
 // ============ RECICLAJE ============
