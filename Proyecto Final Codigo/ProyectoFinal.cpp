@@ -48,6 +48,7 @@ void ChangeZone(int z);
 void GenerarColisionesDeModelo(Model* modelo, int zoneIndex, glm::mat4 transformacionBase);
 void InitDoors();
 void CheckDoorTriggers();
+void UpdateDoorAnim(float dt);
 void RefreshDoorState();
 
 // HUD / Menu
@@ -84,10 +85,6 @@ void EnergiaPress(int button);
 void InitReciclajeGame();
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
 
-void InitCapsulasGame();
-void UpdateCapsulasGame(float dt);
-void DrawCapsulasGame(const glm::mat4& projection, const glm::mat4& view);
-void CapsulasCheckNearest();
 // SetCurrentZoneDifficulty se declara despues del enum Difficulty (mas abajo)
 
 // ============ TIPOS ============
@@ -377,6 +374,16 @@ ZoneDoor zoneDoors[8];
 // disparamos en el flanco de entrada (fuera -> dentro).
 bool doorPlayerInside[8] = { false };
 
+// --- Animacion de apertura ---
+// Cuando el jugador entra a una puerta, la puerta sube doorOpenAmount metros
+// y, al llegar al tope, dispara el teleport. Asi se ve la accion "se abre y
+// el personaje pasa" en vez de un teletransporte instantaneo. Una sola
+// puerta puede estar abriendose a la vez (gDoorAnimating).
+float doorOpenAmount[8] = { 0.0f };          // 0=cerrada, 1=arriba (en unidades de DOOR_SLIDE_HEIGHT)
+int   gDoorAnimating    = -1;                // idx de la puerta en proceso, -1=ninguna
+const float DOOR_OPEN_SPEED   = 1.6f;        // 1/seg: tarda ~0.6 s en abrir
+const float DOOR_SLIDE_HEIGHT = 3.2f;        // metros que sube en world space
+
 bool keyFLast = false;
 bool keyF1Last = false, keyF2Last = false, keyF3Last = false, keyF4Last = false, keyF8Last = false;
 bool keyZoneLast[5] = { false, false, false, false, false };
@@ -448,21 +455,6 @@ struct ReciclajeGame {
     int selectedBox = 0;       // 0..4 caja interactiva activa para mover en X/Y/Z
 };
 
-// --- Capsulas (Buscar al intruso) ---
-struct CapsulasGame {
-    Difficulty difficulty = DIFF_EASY;
-    bool active = false;
-    int totalCapsules = 4;
-    int intruderIdx = 0;
-    float timeLeft = 60.0f;
-    float moveInterval = 0.0f;     // 0 = no se mueve
-    float moveTimer = 0.0f;
-    int   lastChecked = -1;
-    float lastCheckedTimer = 0.0f; // animacion de flash al revisar
-    bool  win = false;
-    bool  lose = false;
-};
-
 // --- Espectrografia del meteorito (segundo minijuego del invernadero) ---
 // El meteorito recorre una orbita circular sobre el domo. Cada cierto
 // intervalo aparece una "linea espectral objetivo" (H-alpha, H-beta,
@@ -492,7 +484,6 @@ struct EspectroGame {
 InvernaderoGame gInvernadero;
 SimonGame gEnergia;
 ReciclajeGame gReciclaje;
-CapsulasGame gCapsulas;
 EspectroGame gEspectro;
 
 // Lineas espectrales del minijuego del meteorito. Las definimos aqui para que
@@ -504,17 +495,6 @@ const glm::vec4 ESPECTRO_COLORS[4] = {
     glm::vec4(1.00f, 0.85f, 0.18f, 1.0f)  // Na/Sun amarillo (589 nm)
 };
 const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "Na/Sun" };
-
-const glm::vec3 CAPSULA_SLOTS[8] = {
-    glm::vec3( -7.5f, 0.9f, -1.5f),
-    glm::vec3( -7.5f, 0.9f,  1.5f),
-    glm::vec3( -9.5f, 0.9f, -1.5f),
-    glm::vec3( -9.5f, 0.9f,  1.5f),
-    glm::vec3(-11.5f, 0.9f, -1.5f),
-    glm::vec3(-11.5f, 0.9f,  1.5f),
-    glm::vec3(-13.5f, 0.9f, -1.5f),
-    glm::vec3(-13.5f, 0.9f,  1.5f)
-};
 
 // Macetas distribuidas en dos filas (izquierda y derecha del invernadero),
 // con dos macetas cada una a distinto z. Las notas no caen de arriba: viajan
@@ -551,7 +531,7 @@ const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
 };
 
 bool keyZLast = false, keyXLast = false, keyCLast = false, keyVLast = false;
-bool keyGLast = false, keyBLast = false, keyELast = false;
+bool keyGLast = false, keyBLast = false;
 bool keyTabLast = false;
 bool keyDiff7Last = false, keyDiff8Last = false, keyDiff9Last = false;
 
@@ -842,6 +822,11 @@ static bool PlayerInsideDoor(const ZoneDoor& d) {
 }
 
 void CheckDoorTriggers() {
+    // Si ya hay una puerta abriendose, no permitimos disparar otra hasta
+    // que termine la animacion (evita dobles teleports si el jugador se
+    // mueve rapido entre hitboxes).
+    if (gDoorAnimating >= 0) return;
+
     for (int i = 0; i < 8; ++i) {
         const ZoneDoor& d = zoneDoors[i];
         if (d.fromZone != currentZone) {
@@ -851,10 +836,28 @@ void CheckDoorTriggers() {
         bool now = PlayerInsideDoor(d);
         if (now && !doorPlayerInside[i]) {
             doorPlayerInside[i] = true;
-            ChangeZone(d.toZone);
+            // En vez de teletransportar al instante, arrancamos la animacion
+            // de la puerta. Al terminar, UpdateDoorAnim hace ChangeZone.
+            gDoorAnimating = i;
+            doorOpenAmount[i] = 0.0f;
             return;
         }
         doorPlayerInside[i] = now;
+    }
+}
+
+void UpdateDoorAnim(float dt) {
+    if (gDoorAnimating < 0) return;
+    int i = gDoorAnimating;
+    doorOpenAmount[i] += dt * DOOR_OPEN_SPEED;
+    if (doorOpenAmount[i] >= 1.0f) {
+        doorOpenAmount[i] = 1.0f;
+        int toZone = zoneDoors[i].toZone;
+        gDoorAnimating = -1;
+        // Las demas puertas (incluida esta, pero en la zona destino) deben
+        // arrancar cerradas; ChangeZone resetea su estado de "jugador dentro".
+        for (int j = 0; j < 8; ++j) doorOpenAmount[j] = 0.0f;
+        ChangeZone(toZone);
     }
 }
 
@@ -909,7 +912,6 @@ void ChangeZone(int z) {
     gInvernadero.topDown = false;
     gReciclaje.active = false;
     gEnergia.active = false;
-    gCapsulas.active = false;
     gEspectro.active = false;
     gMinigameCamLocked = false;
 
@@ -939,8 +941,8 @@ void ChangeZone(int z) {
         PushNarrative("Tarea: pulsa los botones de las pilas en el orden indicado. Pulsa B para empezar.");
         break;
     case 4:
-        PushNarrative("CAPSULAS: un intruso se infiltro en una de las criocamaras.");
-        PushNarrative("Tarea: revisa cada capsula con F. Pulsa B para empezar.");
+        PushNarrative("CAPSULAS: las criocamaras de la tripulacion duermen en silencio.");
+        PushNarrative("Pasea con libertad y vuelve al HUB cuando quieras.");
         break;
     }
 }
@@ -1330,6 +1332,7 @@ void UpdateCharacter(float dt) {
     }
 
     CheckDoorTriggers();
+    UpdateDoorAnim(dt);
 
     PERSONAJE->UpdateAnimation(dt);
 }
@@ -1407,7 +1410,6 @@ bool Update() {
         if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
         if (currentZone == 1 && gEspectro.active)    UpdateEspectroGame(deltaTime);
         if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
-        if (currentZone == 4 && gCapsulas.active)    UpdateCapsulasGame(deltaTime);
     }
 
     // Resetear luces extras por defecto
@@ -1532,45 +1534,14 @@ bool Update() {
     int alphaOpaque = 32;
 
 
-    // Material metalico mas pulido: specular muy alto y un tono base mas claro
-    // para que se note el brillo tipo cromo y el highlight a contraluz.
-    glm::vec4 ambMetal = glm::vec4(0.06f, 0.06f, 0.07f, 1.0f);
-    glm::vec4 diffMetal = glm::vec4(0.65f, 0.66f, 0.70f, 1.0f);
-    glm::vec4 specMetal = glm::vec4(20.0f, 20.0f, 22.0f, 1.0f);
-    int alphaMetal = 4096;
-
-    // Pase fresnel real con cubemap del skybox para los modelos metalicos.
-    // Se dibuja con blend aditivo encima del pase phong base, asi el color
-    // del FBX sigue debajo y arriba se anade el reflejo del entorno (chrome).
-    // Bias alto + Scale moderado mantiene reflejo incluso al ver el metal
-    // de frente; en angulos rasantes la reflexion llega a 1 (rim brillante).
-    auto DrawMetalFresnelOverlay = [&](Model* m, const glm::mat4& modelMat) {
-        if (!m || !fresnelShader || !mainCubeMap) return;
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        // El pase phong base ya escribio depth para este modelo; con GL_LESS
-        // por defecto el segundo pase no pasaria el depth test (los z son
-        // iguales). Cambiamos a GL_LEQUAL para que el overlay quede visible.
-        glDepthFunc(GL_LEQUAL);
-        fresnelShader->use();
-        fresnelShader->setMat4("projection", projection);
-        fresnelShader->setMat4("view", view);
-        fresnelShader->setMat4("model", modelMat);
-        fresnelShader->setVec3("cameraPosition", eyePos);
-        fresnelShader->setFloat("_Bias",  0.20f);
-        fresnelShader->setFloat("_Scale", 0.90f);
-        fresnelShader->setFloat("_Power", 3.0f);
-        fresnelShader->setFloat("mRefractionRatio", 0.98f);
-        fresnelShader->setFloat("fresnelAlpha", 0.55f); // intensidad del overlay
-        fresnelShader->setFloat("diffuseMix",  0.0f);    // solo cubemap, no diffuse
-        glActiveTexture(GL_TEXTURE5);
-        glBindTexture(GL_TEXTURE_CUBE_MAP, mainCubeMap->textureID);
-        fresnelShader->setInt("cubetex", 5);
-        glActiveTexture(GL_TEXTURE0);
-        m->Draw(*fresnelShader);
-        glDepthFunc(GL_LESS);
-        glDisable(GL_BLEND);
-    };
+    // Material metalico opaco. Specular moderado para un highlight visible
+    // pero sin look "espejado": el reflejo de cubemap (overlay fresnel) se
+    // eliminó porque hacia ver el metal como cromo translucido. El metal
+    // ahora se siente solido, con brillo direccional del phong y nada mas.
+    glm::vec4 ambMetal = glm::vec4(0.08f, 0.08f, 0.09f, 1.0f);
+    glm::vec4 diffMetal = glm::vec4(0.55f, 0.56f, 0.60f, 1.0f);
+    glm::vec4 specMetal = glm::vec4(2.5f, 2.5f, 2.8f, 1.0f);
+    int alphaMetal = 128;
 
 
     // Dibuja la puerta dorada PUERTA_MODELO en el centro de la hitbox dada,
@@ -1578,7 +1549,9 @@ bool Update() {
     // Se usa tanto para las 4 puertas del HUB como para las puertas de
     // retorno de cada zona habitable (asi todas las zonas tienen un
     // marcador visible donde se activa el teletransporte).
-    auto DrawZoneDoor = [&](const ZoneDoor& d, float doorYaw) {
+    // doorIdx se usa para leer doorOpenAmount y deslizar la puerta hacia
+    // arriba cuando el jugador la dispara (apertura tipo blast-door).
+    auto DrawZoneDoor = [&](int doorIdx, const ZoneDoor& d, float doorYaw) {
         if (!PUERTA_MODELO) return;
         float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
         float dx = player.position.x - d.center.x;
@@ -1595,8 +1568,14 @@ bool Update() {
         phongShader->use();
         SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
 
+        // Suavizado (smoothstep) en la subida: arranque y final mas suaves
+        // que un lerp lineal, da sensacion de servo mecanico.
+        float a = (doorIdx >= 0 && doorIdx < 8) ? doorOpenAmount[doorIdx] : 0.0f;
+        float aSmooth = a * a * (3.0f - 2.0f * a);
+        float yOffset = aSmooth * DOOR_SLIDE_HEIGHT;
+
         glm::mat4 m(1.0f);
-        m = glm::translate(m, d.center);
+        m = glm::translate(m, d.center + glm::vec3(0.0f, yOffset, 0.0f));
         m = glm::rotate(m, glm::radians(doorYaw), glm::vec3(0.0f, 1.0f, 0.0f));
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.6f));
@@ -1623,7 +1602,7 @@ bool Update() {
             const float doorYaws[4] = { 180.0f, -90.0f, 0.0f, 90.0f };
             for (int i = 0; i < 4; ++i) {
                 if (zoneDoors[i].fromZone != 0) continue;
-                DrawZoneDoor(zoneDoors[i], doorYaws[i]);
+                DrawZoneDoor(i, zoneDoors[i], doorYaws[i]);
             }
             // Restablecer material para no afectar dibujos posteriores
             SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
@@ -1806,20 +1785,19 @@ bool Update() {
         }
 
         // Puerta de retorno al HUB (zoneDoors[4], borde norte del invernadero)
-        DrawZoneDoor(zoneDoors[4], RETURN_DOOR_YAW[0]);
+        DrawZoneDoor(4, zoneDoors[4], RETURN_DOOR_YAW[0]);
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
     case 2: // RECICLAJE
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (RECICLAJE_OPACO) RECICLAJE_OPACO->Draw(*phongShader);
-        // Pase metalico base + overlay fresnel/rim para que se vea brilloso
+        // Pase metalico opaco. El overlay fresnel se quito porque el reflejo
+        // del cubemap hacia ver el metal demasiado "transparente"/espejado;
+        // ahora el highlight viene solo del specular phong.
         phongShader->setMat4("model", baseModelMat);
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
-        if (RECICLAJE_METAL) {
-            RECICLAJE_METAL->Draw(*phongShader);
-            DrawMetalFresnelOverlay(RECICLAJE_METAL, baseModelMat);
-        }
+        if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
 
         // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
         if (CAJA_MODELO) {
@@ -1841,26 +1819,23 @@ bool Update() {
         if (gReciclaje.active) DrawReciclajeGame(projection, view);
 
         // Puerta de retorno al HUB (zoneDoors[5], borde oeste del modulo)
-        DrawZoneDoor(zoneDoors[5], RETURN_DOOR_YAW[1]);
+        DrawZoneDoor(5, zoneDoors[5], RETURN_DOOR_YAW[1]);
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
     case 3: // ENERGIA
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (ENERGIA_OPACO) ENERGIA_OPACO->Draw(*phongShader);
-        // Pase metalico base + overlay fresnel/rim
+        // Pase metalico opaco (sin overlay fresnel; ver nota en RECICLAJE).
         phongShader->setMat4("model", baseModelMat);
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
-        if (ENERGIA_METALICO) {
-            ENERGIA_METALICO->Draw(*phongShader);
-            DrawMetalFresnelOverlay(ENERGIA_METALICO, baseModelMat);
-        }
+        if (ENERGIA_METALICO) ENERGIA_METALICO->Draw(*phongShader);
 
         // ====== MINIJUEGO SIMON (Energia) ======
         if (gEnergia.active) DrawEnergiaGame(projection, view);
 
         // Puerta de retorno al HUB (zoneDoors[6], borde sur del modulo)
-        DrawZoneDoor(zoneDoors[6], RETURN_DOOR_YAW[2]);
+        DrawZoneDoor(6, zoneDoors[6], RETURN_DOOR_YAW[2]);
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
 
@@ -1868,11 +1843,8 @@ bool Update() {
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (CAPSULAS_OPACO) CAPSULAS_OPACO->Draw(*phongShader);
 
-        // ====== MINIJUEGO BUSCAR AL INTRUSO (Capsulas) ======
-        if (gCapsulas.active) DrawCapsulasGame(projection, view);
-
         // Puerta de retorno al HUB (zoneDoors[7], borde este del modulo)
-        DrawZoneDoor(zoneDoors[7], RETURN_DOOR_YAW[3]);
+        DrawZoneDoor(7, zoneDoors[7], RETURN_DOOR_YAW[3]);
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         break;
     }
@@ -2200,7 +2172,6 @@ static Difficulty CurrentHelpDifficulty() {
     case 1: return gInvernadero.difficulty;
     case 2: return gReciclaje.difficulty;
     case 3: return gEnergia.difficulty;
-    case 4: return gCapsulas.difficulty;
     default: return DIFF_EASY;
     }
 }
@@ -2259,8 +2230,7 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY) out.push_back("Memoriza la secuencia de colores y repitela");
         break;
     case 4: // CAPSULAS
-        out.push_back("B = nueva ronda  |  F = revisar la capsula mas cercana");
-        if (d <= DIFF_EASY) out.push_back("Busca al intruso antes de que se acabe el tiempo");
+        if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta dorada");
         break;
     }
 
@@ -2803,28 +2773,7 @@ void processInput(GLFWwindow* window) {
         }
     }
 
-    // ZONA 4: CAPSULAS - Buscar al intruso
-    // E = revisar la capsula mas cercana al avatar
-    // B = nueva partida con la dificultad actual
-    if (currentZone == 4) {
-        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
-        if (bKey && !keyBLast) {
-            InitCapsulasGame();
-            gCapsulas.active = true;
-            PushNarrative("CAPSULAS: pulsa F junto a una capsula para revisarla antes de que se acabe el tiempo.");
-            std::cout << "[Capsulas] Nueva partida (dificultad " << gCapsulas.difficulty << ")" << std::endl;
-        }
-        keyBLast = bKey;
-
-        // F (interactuar/recoger) revisa la capsula mas cercana al jugador.
-        // El nombre coincide con la convencion Genshin documentada en el HUD
-        // y en el README.
-        bool fKey = glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS;
-        if (fKey && !keyELast) {
-            CapsulasCheckNearest();
-        }
-        keyELast = fKey;
-    }
+    // ZONA 4: CAPSULAS - zona de descanso, sin minijuego.
 }
 
 void SetLightUniforms(Shader* shader) {
@@ -2881,7 +2830,6 @@ void SetCurrentZoneDifficulty(Difficulty d) {
     case 1: gInvernadero.difficulty = d; break;
     case 2: gReciclaje.difficulty   = d; break;
     case 3: gEnergia.difficulty     = d; break;
-    case 4: gCapsulas.difficulty    = d; break;
     default: return;
     }
     std::cout << "[Zona " << currentZone << "] Dificultad: " << difLbl[(int)d] << std::endl;
@@ -3037,7 +2985,7 @@ void UpdateInvernaderoGame(float dt) {
 }
 
 void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CAJA_MODELO) return;
+    if (!CUBO_MODELO || !PLANO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
@@ -3057,13 +3005,10 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     if (lanes > 4) lanes = 4;
 
     // 1) Marcador plano sobre cada maceta ACTIVA para indicar donde caera la
-    //    nota. Usa PLANO_MODELO (mas natural que un cubo aplanado); si por
-    //    algun motivo no carga, hace fallback a CAJA_MODELO escalado fino.
-    //    Se respetan las macetas originales del modelo INVERNADERO_OPACO;
-    //    el marcador apenas roza el piso (y = 0.02) y "florece" cuando
-    //    recibimos un acierto (waterEffect).
-    Model* floorMarker = PLANO_MODELO ? PLANO_MODELO : CAJA_MODELO;
-    bool floorIsPlano  = (PLANO_MODELO != nullptr);
+    //    nota. Usa PLANO_MODELO directamente (mas natural que un cubo
+    //    aplanado). Se respetan las macetas originales del modelo
+    //    INVERNADERO_OPACO; el marcador apenas roza el piso (y = 0.02) y
+    //    "florece" cuando recibimos un acierto (waterEffect).
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = INV_PLANT_POSITIONS[i];
         base.y = 0.02f;
@@ -3074,19 +3019,10 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        // Para el plano usamos escala uniforme en XZ (ya esta horizontal en
-        // el FBX). Para el cubo de fallback aplanamos el eje Z.
-        if (floorIsPlano) {
-            float s = 0.85f + waterBoost * 0.5f;
-            m = glm::scale(m, glm::vec3(s, 1.0f, s));
-        } else {
-            m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-            m = glm::scale(m, glm::vec3(0.85f + waterBoost * 0.5f,
-                                        0.85f + waterBoost * 0.5f,
-                                        0.05f));
-        }
+        float s = 0.85f + waterBoost * 0.5f;
+        m = glm::scale(m, glm::vec3(s, 1.0f, s));
         phongShader->setMat4("model", m);
-        floorMarker->Draw(*phongShader);
+        PLANO_MODELO->Draw(*phongShader);
     }
 
     // 1b) Capa de transparencia de color encima de las macetas activas: un
@@ -3106,10 +3042,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(1.1f, 1.1f, 0.9f));
+        m = glm::scale(m, glm::vec3(1.1f, 0.9f, 1.1f));
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        CUBO_MODELO->Draw(*phongShader);
     }
     phongShader->setFloat("transparency", 1.0f);
     glDepthMask(GL_TRUE);
@@ -3139,10 +3074,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, pos);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.28f));
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        CUBO_MODELO->Draw(*phongShader);
     }
 
     // 3) Gotas de agua: pequenios cubos translucidos azules que caen hacia la
@@ -3156,10 +3090,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, d.pos);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.12f, 0.12f, 0.18f));
+        m = glm::scale(m, glm::vec3(0.12f, 0.18f, 0.12f));
         phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+        CUBO_MODELO->Draw(*phongShader);
     }
     phongShader->setFloat("transparency", 1.0f);
     glDisable(GL_BLEND);
@@ -3271,7 +3204,7 @@ void UpdateEnergiaGame(float dt) {
 }
 
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CAJA_MODELO) return;
+    if (!CUBO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
@@ -3287,10 +3220,8 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
     };
 
     float t = (float)glfwGetTime();
-    // Cubos de los botones del Simon: ahora usamos el primitivo CUBO_MODELO
-    // (mas limpio que CAJA_MODELO, que viene tinteada del FBX). Fallback al
-    // anterior si CUBO_MODELO no esta presente para no romper el render.
-    Model* buttonModel = CUBO_MODELO ? CUBO_MODELO : CAJA_MODELO;
+    // Botones del Simon como cubos limpios (sin tinte del FBX de CAJA).
+    Model* buttonModel = CUBO_MODELO;
     for (int i = 0; i < 4; ++i) {
         float glow = gEnergia.buttonGlow[i];
         float pulse = 0.55f + 0.20f * sinf(t * 2.5f + i);
@@ -3388,160 +3319,6 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
         m = glm::translate(m, p);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.18f * pulse));
-        phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
-    }
-}
-
-// ============ CAPSULAS (Buscar al intruso) ============
-
-void InitCapsulasGame() {
-    switch (gCapsulas.difficulty) {
-    case DIFF_EASY:
-        gCapsulas.totalCapsules = 4;
-        gCapsulas.timeLeft = 60.0f;
-        gCapsulas.moveInterval = 0.0f;       // intruso fijo
-        break;
-    case DIFF_MEDIUM:
-        gCapsulas.totalCapsules = 6;
-        gCapsulas.timeLeft = 45.0f;
-        gCapsulas.moveInterval = 20.0f;
-        break;
-    case DIFF_EXPERT:
-        gCapsulas.totalCapsules = 8;
-        gCapsulas.timeLeft = 30.0f;
-        gCapsulas.moveInterval = 10.0f;
-        break;
-    default:
-        gCapsulas.totalCapsules = 4;
-        gCapsulas.timeLeft = 60.0f;
-        gCapsulas.moveInterval = 0.0f;
-        break;
-    }
-    if (gCapsulas.totalCapsules > 8) gCapsulas.totalCapsules = 8;
-    srand((unsigned)(glfwGetTime() * 1000.0) + 7);
-    gCapsulas.intruderIdx = rand() % gCapsulas.totalCapsules;
-    gCapsulas.moveTimer = gCapsulas.moveInterval;
-    gCapsulas.lastChecked = -1;
-    gCapsulas.lastCheckedTimer = 0.0f;
-    gCapsulas.win = false;
-    gCapsulas.lose = false;
-    std::cout << "[Capsulas] " << gCapsulas.totalCapsules << " capsulas, "
-              << gCapsulas.timeLeft << "s, intervalo de movimiento="
-              << gCapsulas.moveInterval << "s" << std::endl;
-}
-
-void CapsulasCheckNearest() {
-    if (!gCapsulas.active) return;
-    if (gCapsulas.win || gCapsulas.lose) return;
-
-    // Cápsula más cercana al avatar dentro de un radio de "asomarse"
-    int best = -1;
-    float bestDist = 2.0f; // metros
-    for (int i = 0; i < gCapsulas.totalCapsules; i++) {
-        glm::vec3 d = CAPSULA_SLOTS[i] - player.position;
-        d.y = 0.0f;
-        float dist = glm::length(d);
-        if (dist < bestDist) { bestDist = dist; best = i; }
-    }
-
-    if (best < 0) {
-        PushNarrative("Acercate a una capsula para revisarla.");
-        std::cout << "[Capsulas] Acercate a una capsula para revisarla." << std::endl;
-        return;
-    }
-
-    gCapsulas.lastChecked = best;
-    gCapsulas.lastCheckedTimer = 0.6f;
-
-    if (best == gCapsulas.intruderIdx) {
-        gCapsulas.win = true;
-        char buf[80];
-        snprintf(buf, sizeof(buf), "Intruso atrapado en la capsula %d! Te sobraron %.1fs.",
-                 best, gCapsulas.timeLeft);
-        PushNarrative(buf);
-        std::cout << "[Capsulas] INTRUSO ATRAPADO en capsula " << best
-                  << "  Tiempo restante=" << gCapsulas.timeLeft << "s" << std::endl;
-    }
-    else {
-        char buf[80];
-        snprintf(buf, sizeof(buf), "Capsula %d vacia. Sigue buscando.", best);
-        PushNarrative(buf);
-        std::cout << "[Capsulas] Capsula " << best << " vacia." << std::endl;
-    }
-}
-
-void UpdateCapsulasGame(float dt) {
-    if (gCapsulas.win || gCapsulas.lose) return;
-
-    gCapsulas.timeLeft -= dt;
-    if (gCapsulas.lastCheckedTimer > 0.0f) gCapsulas.lastCheckedTimer -= dt;
-
-    if (gCapsulas.timeLeft <= 0.0f) {
-        gCapsulas.timeLeft = 0.0f;
-        gCapsulas.lose = true;
-        std::cout << "[Capsulas] TIEMPO AGOTADO. El intruso estaba en capsula "
-                  << gCapsulas.intruderIdx << "." << std::endl;
-        return;
-    }
-
-    if (gCapsulas.moveInterval > 0.0f) {
-        gCapsulas.moveTimer -= dt;
-        if (gCapsulas.moveTimer <= 0.0f) {
-            int prev = gCapsulas.intruderIdx;
-            do {
-                gCapsulas.intruderIdx = rand() % gCapsulas.totalCapsules;
-            } while (gCapsulas.intruderIdx == prev && gCapsulas.totalCapsules > 1);
-            gCapsulas.moveTimer = gCapsulas.moveInterval;
-            std::cout << "[Capsulas] El intruso se movio..." << std::endl;
-        }
-    }
-}
-
-void DrawCapsulasGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CAJA_MODELO) return;
-    phongShader->use();
-    phongShader->setMat4("projection", projection);
-    phongShader->setMat4("view", view);
-
-    float t = (float)glfwGetTime();
-
-    for (int i = 0; i < gCapsulas.totalCapsules; i++) {
-        // Color base: cyan suave para todas las capsulas (interrogante neutro)
-        glm::vec4 c(0.40f, 0.85f, 1.0f, 1.0f);
-
-        // Si recien la revisamos, flashear verde (acierto) o rojo (vacia)
-        if (gCapsulas.lastChecked == i && gCapsulas.lastCheckedTimer > 0.0f) {
-            float k = glm::clamp(gCapsulas.lastCheckedTimer / 0.6f, 0.0f, 1.0f);
-            if (i == gCapsulas.intruderIdx) {
-                c = glm::mix(c, glm::vec4(0.1f, 1.0f, 0.2f, 1.0f), k);
-            }
-            else {
-                c = glm::mix(c, glm::vec4(1.0f, 0.2f, 0.2f, 1.0f), k);
-            }
-        }
-
-        // Si la partida termino, revelar al intruso parpadeando
-        if ((gCapsulas.win || gCapsulas.lose) && i == gCapsulas.intruderIdx) {
-            float pulse = 0.5f + 0.5f * sinf(t * 6.0f);
-            c = glm::mix(c, glm::vec4(1.0f, 0.7f, 0.1f, 1.0f), pulse);
-        }
-
-        // Resaltar la capsula a la que se esta acercando el avatar
-        glm::vec3 toCaps = CAPSULA_SLOTS[i] - player.position; toCaps.y = 0.0f;
-        bool isNear = glm::length(toCaps) < 2.0f;
-        float nearBoost = isNear ? 0.45f : 0.0f;
-
-        float pulseAll = 0.85f + 0.15f * sinf(t * 2.0f + i);
-        glm::vec4 finalC = c * (pulseAll + nearBoost);
-        SetMaterial(phongShader, finalC * 0.35f, finalC, glm::vec4(0.5f), 32);
-
-        // Cubo flotante de senalizacion encima de la cápsula
-        glm::mat4 m(1.0f);
-        m = glm::translate(m, CAPSULA_SLOTS[i] + glm::vec3(0.0f, 0.8f + 0.15f*sinf(t*1.5f + i), 0.0f));
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::rotate(m, t * 0.8f + i, glm::vec3(0.0f, 0.0f, 1.0f));
-        m = glm::scale(m, glm::vec3(0.30f + nearBoost * 0.10f));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
