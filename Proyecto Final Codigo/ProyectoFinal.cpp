@@ -297,7 +297,7 @@ const float ZONE_BANNER_DURATION = 2.5f;
 // Se acumulan al entrar a una zona o al iniciar un minijuego.
 std::vector<std::string> gNarrativeQueue;
 float gNarrativeTimer = 0.0f;
-const float NARRATIVE_DURATION = 4.5f;
+const float NARRATIVE_DURATION = 2.6f;
 bool gIntroShown = false;
 
 void PushNarrative(const std::string& msg) {
@@ -2306,41 +2306,89 @@ void DrawInstructionsPanel() {
     glEnable(GL_DEPTH_TEST);
 }
 
-// Panel inferior central con el mensaje de narrativa actual. Tiene fade-in y
-// fade-out segun gNarrativeTimer para que se sienta como un dialogo guiado.
+// Panel inferior central con el mensaje de narrativa actual. Estilo "HUD de
+// videojuego": entra deslizandose desde la izquierda, marco con corchetes en
+// las 4 esquinas, stripe magenta al costado y un chevron ">>" pulsante. La
+// duracion total es corta (NARRATIVE_DURATION) para que el jugador no se
+// quede leyendo durante los minijuegos.
 void DrawNarrativePanel() {
     if (gNarrativeQueue.empty()) return;
     if (!gText || !gText->ready) return;
 
+    // gNarrativeTimer cuenta hacia 0; lived es el tiempo desde que aparecio.
     float t = gNarrativeTimer;
+    float lived = NARRATIVE_DURATION - t;
+
+    const float FADE_IN  = 0.18f;
+    const float FADE_OUT = 0.28f;
     float fade;
-    if (t > NARRATIVE_DURATION - 0.4f) fade = (NARRATIVE_DURATION - t) / 0.4f;
-    else if (t < 0.6f)                 fade = t / 0.6f;
-    else                                fade = 1.0f;
+    if (lived < FADE_IN)       fade = lived / FADE_IN;
+    else if (t < FADE_OUT)     fade = t / FADE_OUT;
+    else                       fade = 1.0f;
     fade = glm::clamp(fade, 0.0f, 1.0f);
+
+    // Slide-in horizontal al aparecer (entra desde la izquierda).
+    float slide = (lived < FADE_IN) ? (1.0f - lived / FADE_IN) : 0.0f;
+    float slideOffset = -slide * 90.0f;
+
+    // Pulso del chevron y del stripe magenta.
+    float gt = (float)glfwGetTime();
+    float pulse = 0.55f + 0.45f * sinf(gt * 6.5f);
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     const std::string& msg = gNarrativeQueue.front();
-    float scale = 0.65f;
+    float scale = 0.58f;
     float w = gText->MeasureWidth(msg, scale);
-    float panelW = w + 70.0f;
+    float panelH = 56.0f;
+    float panelW = w + 110.0f; // espacio extra para chevron y padding
     if (panelW > (float)SCR_WIDTH - 40.0f) panelW = (float)SCR_WIDTH - 40.0f;
-    float panelH = 70.0f;
-    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f + slideOffset;
     float panelY = SCR_HEIGHT * 0.18f;
 
+    // Cuerpo del panel (oscuro, casi opaco para que destaque sobre el juego).
     DrawQuad2D(panelX, panelY, panelW, panelH,
-               glm::vec4(0.03f, 0.06f, 0.10f, 0.82f * fade));
-    DrawQuad2D(panelX, panelY + panelH - 3.0f, panelW, 3.0f,
-               glm::vec4(0.35f, 0.85f, 1.0f, fade));
-    DrawQuad2D(panelX, panelY, panelW, 3.0f,
-               glm::vec4(0.35f, 0.85f, 1.0f, fade));
+               glm::vec4(0.02f, 0.04f, 0.08f, 0.88f * fade));
 
-    DrawTextCentered(msg, (float)SCR_WIDTH * 0.5f, panelY + 22.0f, scale,
-                     glm::vec3(0.92f, 0.95f, 1.0f) * fade);
+    // Stripe magenta lateral (acento "alerta" estilo RPG/sci-fi).
+    DrawQuad2D(panelX, panelY, 5.0f, panelH,
+               glm::vec4(1.0f, 0.28f, 0.62f, fade * (0.75f + 0.25f * pulse)));
+
+    // Barras cyan arriba y abajo.
+    DrawQuad2D(panelX, panelY + panelH - 2.0f, panelW, 2.0f,
+               glm::vec4(0.35f, 0.95f, 1.0f, fade));
+    DrawQuad2D(panelX, panelY, panelW, 2.0f,
+               glm::vec4(0.35f, 0.95f, 1.0f, fade * 0.65f));
+
+    // Corchetes en las 4 esquinas (look de HUD videojuego).
+    const float bL = 14.0f, bT = 3.0f;
+    glm::vec4 cBracket(1.0f, 0.85f, 0.25f, fade);
+    // sup-izq
+    DrawQuad2D(panelX,                       panelY + panelH - bT, bL, bT, cBracket);
+    DrawQuad2D(panelX,                       panelY + panelH - bL, bT, bL, cBracket);
+    // sup-der
+    DrawQuad2D(panelX + panelW - bL,         panelY + panelH - bT, bL, bT, cBracket);
+    DrawQuad2D(panelX + panelW - bT,         panelY + panelH - bL, bT, bL, cBracket);
+    // inf-izq
+    DrawQuad2D(panelX,                       panelY,               bL, bT, cBracket);
+    DrawQuad2D(panelX,                       panelY,               bT, bL, cBracket);
+    // inf-der
+    DrawQuad2D(panelX + panelW - bL,         panelY,               bL, bT, cBracket);
+    DrawQuad2D(panelX + panelW - bT,         panelY,               bT, bL, cBracket);
+
+    // Chevron ">>" pulsante a la izquierda del texto.
+    glm::vec3 chCol = glm::vec3(0.30f, 0.95f, 1.0f) * (0.55f + 0.45f * pulse) * fade;
+    gText->RenderText(">>", panelX + 18.0f, panelY + 15.0f, 0.70f, chCol);
+
+    // Texto principal con sombra para legibilidad.
+    float textX = panelX + 60.0f;
+    float textY = panelY + 17.0f;
+    gText->RenderText(msg, textX + 2.0f, textY - 2.0f, scale,
+                      glm::vec3(0.0f, 0.0f, 0.0f) * fade);
+    gText->RenderText(msg, textX, textY, scale,
+                      glm::vec3(0.95f, 1.0f, 1.0f) * fade);
 
     glEnable(GL_DEPTH_TEST);
 }
