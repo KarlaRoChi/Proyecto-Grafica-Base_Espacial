@@ -531,6 +531,19 @@ const glm::vec3 INV_PLANT_POSITIONS[4] = {
     glm::vec3( 3.5f, 0.0f,  -8.0f), // 2 = fila der, atras
     glm::vec3( 3.5f, 0.0f, -14.0f)  // 3 = fila der, adelante
 };
+// En FACIL solo se usan 2 macetas y queremos que coincidan visualmente con
+// las dos primeras macetas reales del modelo del invernadero (mas juntas y
+// desplazadas en +x respecto a la fila izquierda original).
+const glm::vec3 INV_PLANT_POSITIONS_EASY[2] = {
+    glm::vec3(-2.0f, 0.0f, -10.0f), // 0 = mas centrada
+    glm::vec3(-2.0f, 0.0f, -12.0f)  // 1 = al lado de la anterior
+};
+// Devuelve la posicion de la maceta del carril segun la dificultad activa.
+static glm::vec3 InvLanePos(int lane) {
+    if (gInvernadero.activeLanes == 2 && lane < 2)
+        return INV_PLANT_POSITIONS_EASY[lane];
+    return INV_PLANT_POSITIONS[lane];
+}
 // +1 si la nota viaja hacia +x, -1 si hacia -x. Es decir, las notas de la
 // fila izquierda (x negativo) vienen de la pared izquierda y van hacia el
 // centro (+x), y viceversa.
@@ -1198,9 +1211,10 @@ bool Start() {
 // devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        // Centro ajustado al medio de las dos filas de macetas (z = -11).
-        glm::vec3 center(0.0f, 0.0f, -11.0f);
-        glm::vec3 eye(0.0f, 10.0f, -10.99f);
+        // Centro desplazado en +x para encuadrar mejor las macetas reales
+        // del invernadero (que estan corridas hacia la derecha en el modelo).
+        glm::vec3 center(1.5f, 0.0f, -11.0f);
+        glm::vec3 eye(1.5f, 10.0f, -10.99f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
@@ -1271,7 +1285,7 @@ glm::mat4 ComputeView() {
 
 glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        return glm::vec3(0.0f, 14.0f, -9.99f);
+        return glm::vec3(1.5f, 14.0f, -9.99f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
         glm::vec3 eye, target;
@@ -3003,7 +3017,7 @@ void InvernaderoHit(int lane) {
         gInvernadero.score += bonus;
 
         // Spawn de gotas de agua sobre la maceta acertada (animacion de riego)
-        glm::vec3 base = INV_PLANT_POSITIONS[lane];
+        glm::vec3 base = InvLanePos(lane);
         for (int k = 0; k < 14; ++k) {
             WaterDrop d;
             float rx = ((float)rand() / RAND_MAX - 0.5f) * 0.7f;
@@ -3102,8 +3116,12 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     //    aplanado). Se respetan las macetas originales del modelo
     //    INVERNADERO_OPACO; el marcador apenas roza el piso (y = 0.02) y
     //    "florece" cuando recibimos un acierto (waterEffect).
+    // En FACIL las macetas se ven mas pequenias para coincidir con las
+    // macetas reales del modelo (que tambien son chicas).
+    float laneSizeBase = (lanes == 2) ? 0.55f : 0.85f;
+    float laneCylSize  = (lanes == 2) ? 0.70f : 1.10f;
     for (int i = 0; i < lanes; i++) {
-        glm::vec3 base = INV_PLANT_POSITIONS[i];
+        glm::vec3 base = InvLanePos(i);
         base.y = 0.02f;
         float pulse = 0.55f + 0.15f * sinf(gInvernadero.gameTime * 3.0f + i);
         float waterBoost = gInvernadero.waterEffect[i];
@@ -3112,7 +3130,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        float s = 0.85f + waterBoost * 0.5f;
+        float s = laneSizeBase + waterBoost * 0.5f;
         m = glm::scale(m, glm::vec3(s, 1.0f, s));
         phongShader->setMat4("model", m);
         PLANO_MODELO->Draw(*phongShader);
@@ -3125,7 +3143,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (int i = 0; i < lanes; i++) {
-        glm::vec3 base = INV_PLANT_POSITIONS[i];
+        glm::vec3 base = InvLanePos(i);
         base.y = 0.4f;
         float pulse = 0.50f + 0.25f * sinf(gInvernadero.gameTime * 1.8f + i);
         glm::vec4 c = laneColors[i];
@@ -3135,7 +3153,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        m = glm::scale(m, glm::vec3(1.1f, 0.9f, 1.1f));
+        m = glm::scale(m, glm::vec3(laneCylSize, 0.9f, laneCylSize));
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
@@ -3155,7 +3173,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         if (tToHit > lookAhead) continue;
         if (tToHit < -0.4f) continue;
 
-        glm::vec3 target = INV_PLANT_POSITIONS[n.lane];
+        glm::vec3 target = InvLanePos(n.lane);
         glm::vec3 start  = target;
         start.x -= INV_SCROLL_DIR[n.lane] * scrollDist; // viene desde el muro
         float a = glm::clamp(1.0f - (tToHit / lookAhead), 0.0f, 1.0f);
