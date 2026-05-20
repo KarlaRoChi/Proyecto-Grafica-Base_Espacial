@@ -85,10 +85,20 @@ void EspectroChaseCam(glm::vec3& eye, glm::vec3& target);
 void InitEnergiaGame();
 void UpdateEnergiaGame(float dt);
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawEnergiaHUD();
 void EnergiaPress(int button);
 
 void InitReciclajeGame();
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
+
+// Hamburguesa (zona CAPSULAS): minijuego de armado por capas. El jugador
+// pulsa una tecla por capa siguiendo la receta y la torta se construye
+// visualmente sobre la mesa de la zona de practicas.
+void InitHamburguesaGame();
+void UpdateHamburguesaGame(float dt);
+void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawHamburguesaHUD();
+void HamburguesaPress(int ingredient);
 
 // SetCurrentZoneDifficulty se declara despues del enum Difficulty (mas abajo)
 
@@ -249,14 +259,21 @@ public:
 
 // ============ GLOBALES ============
 GLFWwindow* window;
-const unsigned int SCR_WIDTH = 1024;
-const unsigned int SCR_HEIGHT = 768;
+// Tamano de la ventana. NO es const para que framebuffer_size_callback los
+// actualice en cada resize / paso a pantalla completa: el HUD lee estos
+// valores cada frame, asi el minimapa, las barras de estatus, el panel de
+// instrucciones, el manual, etc. se reposicionan solos sin codigo extra.
+unsigned int SCR_WIDTH  = 1024;
+unsigned int SCR_HEIGHT = 768;
 
 Camera camera(glm::vec3(0.0f, 2.0f, 10.0f));
 int currentZone = 0;
 // Arrancamos en tercera persona para que WASD mueva al personaje desde el
 // primer frame (CAM_FREE bloqueaba el movimiento del avatar hasta F1/F2/F3).
-CameraMode cameraMode = CAM_THIRD;
+// Arrancamos en primera persona para que el jugador entre inmediatamente en
+// la perspectiva del astronauta. F1/F2/F3 alternan entre 1ra/2da/3ra y F8
+// libera la camara orbital.
+CameraMode cameraMode = CAM_FIRST;
 
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
@@ -281,10 +298,61 @@ TextRenderer* gText = nullptr;
 unsigned int hudVAO = 0, hudVBO = 0;
 glm::mat4 hudProjection = glm::mat4(1.0f);
 
-enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3 };
+enum MenuState { MENU_NONE = 0, MENU_PAUSE = 1, MENU_CONTROLS = 2, MENU_MAP = 3, MENU_QUESTS = 4 };
 MenuState menuState = MENU_NONE;
 int menuSelection = 0;
 bool showMinimap = true;
+
+// =============================================================
+// VIDA DEL ASTRONAUTA: 5 barras de estatus + flags de progreso
+// =============================================================
+// La narrativa del juego es la vida cotidiana en una base sustentable: el
+// jugador debe mantener agua, comida, oxigeno, energia de la base y tareas
+// asignadas. Cada barra se llena cumpliendo una accion concreta:
+//   - AGUA / COMIDA: preparar comida en CAPSULAS (requiere haber regado las
+//     plantas antes, en el invernadero).
+//   - OXIGENO: la estacion lo provee al 100% siempre.
+//   - ENERGIA: termina el Simon del reactor.
+//   - TAREAS: termina el espectro del cometa Y el reciclaje.
+// Todas arrancan en 0.20 (excepto oxigeno = 1.0) y suben a 1.0 al cumplir.
+struct PlayerStats {
+    float agua    = 0.20f;
+    float comida  = 0.20f;
+    float oxigeno = 1.00f;
+    float energia = 0.20f;
+    float tareas  = 0.20f;
+
+    // Flags de minijuegos completados con exito (para palomear el manual y
+    // para gatear acciones encadenadas como "preparar comida").
+    bool plantsWatered    = false;  // OSU del invernadero
+    bool cometDone        = false;  // espectro del cometa
+    bool recycleDone      = false;  // clasificar todos los items
+    bool simonDone        = false;  // memoria del reactor
+    bool foodPrepared     = false;  // preparar comida en capsulas
+};
+PlayerStats gStats;
+
+// Nota: la version anterior de la zona CAPSULAS solo tenia un timer de
+// cocinado de 3 s (gCookingActive / gCookingTimer / COOKING_DURATION).
+// Lo sustituimos por el minijuego de armado de hamburguesa por capas
+// (struct HamburguesaGame, mas abajo), asi que esas globales ya no son
+// necesarias.
+
+// ALT libera el mouse (lo descaptura) sin abrir ningun menu. Util para
+// mover la ventana, alt-tabear o hacer una captura de pantalla. Cuando esta
+// liberado mouse_callback no rota la camara y el cursor se ve.
+bool gCursorReleased = false;
+
+// Panel de instrucciones: por defecto se muestra "compacto" (solo 2-3 lineas
+// basicas) y la tecla H lo expande con la lista completa.
+bool gHelpExpanded = false;
+
+// Input direccional del jugador en el frame actual (WASD). Lo lee el HUD
+// para dibujar el joystick virtual que refleja por donde se esta moviendo.
+// Componentes en [-1,1]: x = lateral (A negativo / D positivo aunque A/D
+// rotan, lo usamos como giro visual), y = forward (S negativo / W positivo).
+glm::vec2 gMoveInput = glm::vec2(0.0f);
+bool      gIsSprinting = false;
 
 // Banner grande que aparece unos segundos al cambiar de zona ("INVERNADERO")
 std::string gZoneBanner;
@@ -358,6 +426,17 @@ Model* BEBEDERO_AGUA = nullptr;
 // CAJA_MODELO para no romper el render (graceful fallback).
 Model* CUBO_MODELO = nullptr;
 Model* PLANO_MODELO = nullptr;
+
+// Ingredientes de la hamburguesa (zona CAPSULAS). Cada uno es un fbx
+// independiente que se apila visualmente sobre la mesa de practicas cuando
+// el jugador acierta la tecla correspondiente en el minijuego.
+Model* HAMB_PLATO        = nullptr;
+Model* HAMB_PAN_INFERIOR = nullptr;
+Model* HAMB_CARNE        = nullptr;
+Model* HAMB_QUESO        = nullptr;
+Model* HAMB_JITOMATE     = nullptr;
+Model* HAMB_LECHUGA      = nullptr;
+Model* HAMB_PAN_SUPERIOR = nullptr;
 
 CubeMap* mainCubeMap = nullptr;
 std::vector<Light> gLights;
@@ -442,7 +521,16 @@ struct SimonGame {
     int showIndex = -1;
     int level = 1;
     int score = 0;
-    float buttonGlow[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    // Metricas del minijuego (mismo set que OSU/Espectro/Reciclaje para que
+    // el HUD pueda mostrarlas de forma consistente con los otros modulos).
+    int hits = 0;        // botones presionados correctamente en TODA la partida
+    int misses = 0;      // fallos (cada fallo es 1 miss y reinicia patron)
+    int combo = 0;       // racha de aciertos seguidos sin fallar
+    int maxCombo = 0;    // mejor racha de la partida actual
+    int bestLevel = 1;   // mejor nivel alcanzado (sobrevive a fallos hasta cerrar)
+    // Hasta 6 botones (PRINCIPIANTE usa 4, MEDIO y EXPERTO usan 6). Reservamos
+    // 6 slots siempre; SimonActiveButtons() decide cuantos se usan en runtime.
+    float buttonGlow[6] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
 // --- Reciclaje ---
@@ -506,6 +594,96 @@ SimonGame gEnergia;
 ReciclajeGame gReciclaje;
 EspectroGame gEspectro;
 
+// --- Hamburguesa (Zona CAPSULAS, mesa de practicas) ---
+// Minijuego de armado por capas: la receta marca el orden bottom-up
+// (PAN INFERIOR -> CARNE -> QUESO -> JITOMATE -> LECHUGA -> PAN SUPERIOR),
+// el plato esta siempre sobre la mesa. Cada acierto apila el ingrediente
+// real (modelo fbx) y suma score; un error rompe el combo pero deja la
+// torre intacta. Al colocar la ultima capa la tarea "preparar comida"
+// se da por completa y se llenan las barras de agua/comida.
+enum HamburgIng {
+    HAMB_ING_PAN_INFERIOR = 0,
+    HAMB_ING_CARNE        = 1,
+    HAMB_ING_QUESO        = 2,
+    HAMB_ING_JITOMATE     = 3,
+    HAMB_ING_LECHUGA      = 4,
+    HAMB_ING_PAN_SUPERIOR = 5,
+    HAMB_ING_COUNT        = 6
+};
+
+struct HamburguesaGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active           = false;
+    int  step             = 0;       // 0..HAMB_ING_COUNT (cuando llega a 6 termino)
+    int  score            = 0;
+    int  hits             = 0;
+    int  misses           = 0;
+    int  combo            = 0;
+    int  maxCombo         = 0;
+    int  bestStep         = 0;       // mejor numero de capas en la partida actual
+    float layerAnim[HAMB_ING_COUNT] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }; // 0..1 al apilar
+    float feedbackTimer   = 0.0f;    // tiempo de flash rojo tras error
+    bool  lastWrong       = false;   // ultimo intento fallido
+    int   lastWrongIng    = -1;
+    float timeLimit       = 0.0f;    // segundos (0 = sin reloj)
+    float timeLeft        = 0.0f;    // cuenta regresiva en MEDIO/EXPERTO
+    bool  finished        = false;   // todas las capas colocadas
+    bool  failedByTime    = false;
+};
+
+HamburguesaGame gHamburguesa;
+
+// Datos por ingrediente del burger. ALTURA local de cada capa (en
+// unidades de mundo) y la TECLA asociada. La altura se suma en
+// cascada para apilar las capas sobre el plato. Las teclas se eligen
+// fuera del rango de zonas (0..4) y dificultad (7,8,9), y procurando
+// no chocar con los demas minijuegos de otras zonas.
+const char* HAMB_NAMES[HAMB_ING_COUNT] = {
+    "PAN INFERIOR", "CARNE", "QUESO", "JITOMATE", "LECHUGA", "PAN SUPERIOR"
+};
+const char* HAMB_KEY_HINT[HAMB_ING_COUNT] = {
+    "5", "6", "U", "I", "O", "P"
+};
+const int HAMB_KEYS[HAMB_ING_COUNT] = {
+    GLFW_KEY_5, GLFW_KEY_6, GLFW_KEY_U, GLFW_KEY_I, GLFW_KEY_O, GLFW_KEY_P
+};
+// Altura visual aproximada por capa (mundo). Cada capa se apila sumando
+// esta cantidad sobre la anterior. Valores conservadores para que las
+// capas no se traslapen ni floten demasiado lejos entre si.
+const float HAMB_LAYER_H[HAMB_ING_COUNT] = {
+    0.08f,  // pan inferior
+    0.06f,  // carne
+    0.025f, // queso
+    0.04f,  // jitomate
+    0.05f,  // lechuga
+    0.10f   // pan superior
+};
+// Color del chip / icono en el HUD por ingrediente (estilo Simon).
+const glm::vec4 HAMB_CHIP_COLORS[HAMB_ING_COUNT] = {
+    glm::vec4(0.88f, 0.68f, 0.32f, 1.0f), // pan inferior - dorado
+    glm::vec4(0.62f, 0.26f, 0.18f, 1.0f), // carne - cafe rojizo
+    glm::vec4(0.98f, 0.82f, 0.20f, 1.0f), // queso - amarillo
+    glm::vec4(0.92f, 0.22f, 0.20f, 1.0f), // jitomate - rojo
+    glm::vec4(0.32f, 0.78f, 0.30f, 1.0f), // lechuga - verde
+    glm::vec4(0.94f, 0.78f, 0.40f, 1.0f)  // pan superior - dorado claro
+};
+
+// Posicion mundial del centro de la mesa de practicas (zona CAPSULAS).
+// El modelo CAPSULAS_OPACO.fbx exporta la mesa con la tapa sobre el eje
+// y entre [0.67,0.73]. Con baseModelMat (rot -90 X de Blender Z-up a
+// Y-up) eso queda como un cubo en world space con tapa a y=0.73 y
+// centrado en (x=-14.5, z=0.0). Apilamos el plato + capas sobre ese
+// punto.
+const glm::vec3 HAMB_TABLE_TOP = glm::vec3(-14.5f, 0.73f, 0.0f);
+// Cuanto sube el plato por encima de la tapa de la mesa para evitar
+// z-fight con el mantel/plastico del modelo.
+const float    HAMB_PLATE_LIFT = 0.005f;
+// Escala uniforme aplicada a los modelos del burger. Los fbx vienen
+// dimensionados para encajar como hamburguesa real (~14 cm de ancho)
+// asi que basta con un escalado pequeno para que se vea sobre la
+// mesa sin ocupar toda la sala.
+const float    HAMB_MODEL_SCALE = 1.0f;
+
 // Lineas espectrales del minijuego del meteorito. La serie de Balmer del
 // hidrogeno tiene cuatro lineas en el visible; las usamos como objetivos del
 // "sweet spot" y como colores que toma el meteoro al detener la barra. Las
@@ -548,16 +726,92 @@ static glm::vec3 InvLanePos(int lane) {
 const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 
 // La zona ENERGIA tiene 6 pilas (L_1..L_3 y R_1..R_3). El minijuego de
-// luces usa SOLO una pila para concentrar la atencion del jugador: la pila
-// central derecha (R_2) que queda visible de frente al spawn. Los 4 botones
-// del Simon estan distribuidos en una columna sobre la cara frontal de esa
-// pila para que se puedan clickear sin perdersepor el modelo.
-const glm::vec3 SIMON_BUTTON_POSITIONS[4] = {
-    glm::vec3(2.8f, 0.9f, 11.5f),   // boton inferior
-    glm::vec3(2.8f, 1.5f, 11.5f),
-    glm::vec3(2.8f, 2.1f, 11.5f),
-    glm::vec3(2.8f, 2.7f, 11.5f)    // boton superior
+// luces (Simon dice) usa SOLO una pila para concentrar la atencion del
+// jugador: la pila R_1 (cara frontal contra la pared +X, fondo +Z de la
+// sala). Esa pila trae 12 botones reales del modelo distribuidos en un
+// grid 3x4 (3 filas en Y, 4 columnas en Z), todos sobre la cara x ~= 5.116.
+// Tomamos 4 botones contiguos del cuadrante superior-izquierdo del grid
+// (filas 1 y 2, columnas 0 y 1) para formar el cuadrado clasico 2x2 del
+// Simon. Encima de cada boton real dibujamos un "plano" coloreado a modo
+// de membrana de tacto (rojo / verde / azul / amarillo). Las coordenadas
+// se leyeron directamente del .obj exportado del Blender (Y-up), que
+// coincide con las coordenadas de mundo en runtime (el render del FBX
+// no aplica rotacion adicional sobre los modelos de zona).
+//
+// Layout en pantalla (camara mira +X, +Z queda a la derecha y +Y arriba):
+//   idx 0 ROJO     -> R_1_20 (top-right en pantalla)
+//   idx 1 VERDE    -> R_1_21 (top-left)
+//   idx 2 AZUL     -> R_1_10 (bot-right)
+//   idx 3 AMARILLO -> R_1_11 (bot-left)
+//
+// IMPORTANTE sobre la coordenada X: el boton fisico es un cubo que va
+// de x=5.076 (cara que mira al jugador) a x=5.116 (cara pegada a la
+// pila). Como la camara queda en X mas chico (~x=2.7) y mira hacia +X,
+// la cara VISIBLE del boton es la de x=5.076. Por eso colocamos el
+// "centro de click" justo sobre esa cara (x=5.076) y la membrana se
+// separa hacia -X (toward camera, OFFSET negativo) para flotar entre
+// la camara y el boton. Antes usabamos x=5.116 con offset positivo y
+// la membrana quedaba DETRAS del boton (oculta por el cubo).
+//
+// Layout DINAMICO segun dificultad (SimonActiveButtons()):
+//   PRINCIPIANTE (4): cuadrado 2x2 sobre las columnas centro de la pila
+//   MEDIO + EXPERTO  (6): fila doble 2x3 cubriendo 3 columnas adyacentes
+// Con 6 botones la membrana cae sobre 3 columnas en lugar de 2, asi la
+// pila se ve mas "encendida" y el reto memoria-color sube de golpe.
+static const glm::vec3 SIMON_POS_4[4] = {
+    glm::vec3(5.076f, 1.50f, 12.90f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.076f, 1.50f, 12.60f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.076f, 1.10f, 12.90f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.076f, 1.10f, 12.60f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
+static const glm::vec3 SIMON_POS_6[6] = {
+    glm::vec3(5.076f, 1.50f, 12.90f),  // 0 ROJO     - top-right
+    glm::vec3(5.076f, 1.50f, 12.60f),  // 1 VERDE    - top-mid
+    glm::vec3(5.076f, 1.50f, 12.30f),  // 2 AZUL     - top-left
+    glm::vec3(5.076f, 1.10f, 12.90f),  // 3 AMARILLO - bot-right
+    glm::vec3(5.076f, 1.10f, 12.60f),  // 4 NARANJA  - bot-mid
+    glm::vec3(5.076f, 1.10f, 12.30f)   // 5 MAGENTA  - bot-left
+};
+
+// Separacion en X de la membrana respecto a la cara del boton. Negativo
+// = hacia el jugador (entre la camara y el boton). 4 cm para que el
+// plano flote claramente DELANTE del cubo sin clipear con el modelo.
+const float SIMON_MEMBRANE_OFFSET = -0.040f;
+
+// Hasta 6 colores: los primeros 4 son el Simon clasico (rojo / verde /
+// azul / amarillo). Los dos extra (naranja vibrante y magenta brillante)
+// se eligen para que sean distinguibles de los anteriores incluso con la
+// iluminacion calida del cuarto de energia.
+static const glm::vec4 SIMON_COLORS[6] = {
+    glm::vec4(1.00f, 0.20f, 0.22f, 1.0f), // 0 ROJO
+    glm::vec4(0.20f, 1.00f, 0.30f, 1.0f), // 1 VERDE
+    glm::vec4(0.25f, 0.55f, 1.00f, 1.0f), // 2 AZUL
+    glm::vec4(1.00f, 0.92f, 0.20f, 1.0f), // 3 AMARILLO
+    glm::vec4(1.00f, 0.48f, 0.05f, 1.0f), // 4 NARANJA
+    glm::vec4(0.95f, 0.30f, 0.95f, 1.0f)  // 5 MAGENTA
+};
+static const char* SIMON_NAMES[6]    = { "ROJO", "VERDE", "AZUL", "AMARILLO", "NARANJA", "MAGENTA" };
+static const char* SIMON_KEY_HINT[6] = { "Z", "X", "C", "V", "N", "M" };
+
+// Cuantos botones estan en uso ahora (depende de la dificultad). 4 en
+// PRINCIPIANTE, 6 en MEDIO/EXPERTO. Centralizado aqui para que el draw,
+// el HUD, el click y la generacion del patron pidan siempre la misma
+// cuenta y se sincronicen sin desfases entre frames.
+static inline int SimonActiveButtons() {
+    return (gEnergia.difficulty == DIFF_EASY) ? 4 : 6;
+}
+static inline glm::vec3 SimonButtonPos(int i) {
+    int n = SimonActiveButtons();
+    if (i < 0 || i >= n) return glm::vec3(0.0f);
+    return (n == 4) ? SIMON_POS_4[i] : SIMON_POS_6[i];
+}
+// Centro del cluster (para enfocar la camara). Con 4 botones cae entre
+// las columnas 12.6/12.9; con 6 cae sobre la columna central 12.6.
+static inline glm::vec3 SimonClusterCenter() {
+    return (SimonActiveButtons() == 4)
+        ? glm::vec3(5.076f, 1.30f, 12.75f)
+        : glm::vec3(5.076f, 1.30f, 12.60f);
+}
 
 const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
     glm::vec3(11.5f, 0.5f, -2.5f),  // METAL
@@ -817,6 +1071,11 @@ void InitRooms() {
 
     for (int i = 0; i < 5; ++i) rooms[i].freeCamPos = glm::vec3(0.0f, 5.0f, 12.0f);
 
+    // El minijuego de reciclaje esta deshabilitado temporalmente. Marcamos
+    // la tarea como completa de entrada para que la barra TAREAS pueda
+    // llegar al 100% solo con el espectro del cometa.
+    gStats.recycleDone = true;
+
     // Ubicaciones iniciales de las cajas
     for (int i = 0; i < 5; ++i) {
         interactiveBoxes[i].startPos = glm::vec3(6.5f + (i * 0.5f), 0.1f, (i % 2 == 0) ? -1.5f : 1.5f);
@@ -844,10 +1103,16 @@ void InitDoors() {
     zoneDoors[3] = { glm::vec3(-4.5f, 0.0f,  0.0f), 0.9f, 0, 4 };
 
     // ---- 4 puertas de retorno al HUB desde cada zona ----
-    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.5f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
-    zoneDoors[5] = { glm::vec3( 6.5f, 0.0f,  0.0f), 0.9f, 2, 0 }; // RECICLAJE -> HUB
-    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  7.0f), 0.9f, 3, 0 }; // ENERGIA -> HUB
-    zoneDoors[7] = { glm::vec3(-7.0f, 0.0f,  0.0f), 0.9f, 4, 0 }; // CAPSULAS -> HUB
+    // Clavadas exactamente sobre la pared interna de cada modulo: el centro
+    // del marco esta en el limite del cuarto, no dentro. Limites de las
+    // habitaciones: INV boundsMax.y=-5, REC boundsMin.x=6, ENE boundsMin.y=6.5,
+    // CAP boundsMax.x=-6.5. El hitbox de radio 0.9 sigue activando el
+    // teleport: la pared frena al jugador a ~0.4 m del centro, bien dentro
+    // del radio del trigger.
+    zoneDoors[4] = { glm::vec3( 0.0f, 0.0f, -5.00f), 0.9f, 1, 0 }; // INVERNADERO -> HUB
+    zoneDoors[5] = { glm::vec3( 6.00f, 0.0f, 0.0f),  0.9f, 2, 0 }; // RECICLAJE -> HUB
+    zoneDoors[6] = { glm::vec3( 0.0f, 0.0f,  6.50f), 0.9f, 3, 0 }; // ENERGIA -> HUB
+    zoneDoors[7] = { glm::vec3(-6.50f, 0.0f, 0.0f),  0.9f, 4, 0 }; // CAPSULAS -> HUB
 }
 
 static bool PlayerInsideDoor(const ZoneDoor& d) {
@@ -960,7 +1225,7 @@ void ChangeZone(int z) {
     // Narrativa contextual por zona (estilo recorrido guiado).
     switch (z) {
     case 0:
-        PushNarrative("HUB CENTRAL: cuatro puertas doradas conectan los modulos de la estacion.");
+        PushNarrative("HUB CENTRAL: cuatro puertas luminosas conectan los modulos de la estacion.");
         PushNarrative("Atraviesa una puerta o pulsa 1-4 para teletransportarte.");
         break;
     case 1:
@@ -968,8 +1233,8 @@ void ChangeZone(int z) {
         PushNarrative("Tarea: riega las plantas siguiendo el ritmo. Pulsa B para empezar.");
         break;
     case 2:
-        PushNarrative("RECICLAJE: clasifica los desechos por tipo de material.");
-        PushNarrative("Tarea: ordena los desechos en las cajas correctas. Pulsa B para empezar.");
+        PushNarrative("RECICLAJE: zona de almacen. El modulo de clasificacion esta en mantenimiento.");
+        PushNarrative("Puedes recorrer la sala con libertad y volver al HUB por la puerta luminosa.");
         break;
     case 3:
         PushNarrative("ENERGIA: el reactor necesita un patron de encendido.");
@@ -1100,6 +1365,15 @@ bool Start() {
     CUBO_MODELO   = CargarModelo("models/cubo.fbx");
     PLANO_MODELO  = CargarModelo("models/plano.fbx");
 
+    // Ingredientes del minijuego de hamburguesa (zona CAPSULAS).
+    HAMB_PLATO        = CargarModelo("models/hamburguesa_plato.fbx");
+    HAMB_PAN_INFERIOR = CargarModelo("models/hamburguesa_paninferior.fbx");
+    HAMB_CARNE        = CargarModelo("models/hamburguesa_carne.fbx");
+    HAMB_QUESO        = CargarModelo("models/hamburguesa_queso.fbx");
+    HAMB_JITOMATE     = CargarModelo("models/hamburguesa_jitomate.fbx");
+    HAMB_LECHUGA      = CargarModelo("models/hamburguesa_lechuga.fbx");
+    HAMB_PAN_SUPERIOR = CargarModelo("models/hamburguesa_pansuperior.fbx");
+
     GenerarColisionesDeModelo(HUB_OPACO, 0, baseModelMat);
     GenerarColisionesDeModelo(INVERNADERO_OPACO, 1, baseModelMat);
     GenerarColisionesDeModelo(RECICLAJE_OPACO, 2, baseModelMat);
@@ -1177,19 +1451,15 @@ bool Start() {
     Light capsulaLight2 = capsulaLight1;
     gLights.push_back(capsulaLight2);
 
-    // [5..8] Botones Simon de la zona ENERGIA. Apagadas por defecto; los
-    // colores se actualizan cada frame en Update segun el estado del minijuego.
-    glm::vec3 simonColors[4] = {
-        glm::vec3(1.0f, 0.25f, 0.25f),
-        glm::vec3(0.25f, 1.0f, 0.30f),
-        glm::vec3(0.30f, 0.55f, 1.0f),
-        glm::vec3(1.0f, 0.95f, 0.25f)
-    };
-    for (int i = 0; i < 4; ++i) {
+    // [5..10] Botones Simon de la zona ENERGIA. Reservamos 6 slots (los 4
+    // del modo PRINCIPIANTE + los 2 extra de MEDIO/EXPERTO). En cada frame
+    // la zona ENERGIA actualiza posicion y power segun SimonActiveButtons();
+    // los slots que sobran (4 y 5 en PRINCIPIANTE) se quedan apagados.
+    for (int i = 0; i < 6; ++i) {
         Light sb;
         sb.type = 0;
-        sb.Position = SIMON_BUTTON_POSITIONS[i];
-        sb.Color = glm::vec4(simonColors[i], 1.0f);
+        sb.Position = SIMON_POS_6[i]; // placeholder, se actualiza en Update
+        sb.Color = SIMON_COLORS[i];
         sb.Power = glm::vec4(0.0f);
         sb.alphaIndex = 8;
         sb.distance = 4.0f;
@@ -1229,9 +1499,15 @@ glm::mat4 ComputeView() {
         return glm::lookAt(eye, target, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        // Vista fija frente a la pila R_2 (centro entre los 4 botones de esa pila)
-        glm::vec3 center(2.8f, 1.8f, 11.5f);
-        glm::vec3 eye  (2.8f, 2.0f,  8.5f);
+        // Vista fija frente a la pila R_1 (rincon +X / +Z). La camara se
+        // pone a la altura del cluster de botones y se separa sobre -X
+        // para que los botones queden centrados y bien grandes en pantalla.
+        // En layout 4 (2x2) la separacion es 2.4 m; en layout 6 (2x3) la
+        // pila se ensancha 0.3 m mas en Z, asi que retrocedemos a 2.8 m
+        // para que los 6 sigan cabiendo comodamente en el frame.
+        glm::vec3 center = SimonClusterCenter();
+        float backDist = (SimonActiveButtons() == 4) ? 2.4f : 2.8f;
+        glm::vec3 eye    = center + glm::vec3(-backDist, 0.05f, 0.0f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     }
     if (cameraMode == CAM_FREE) return camera.GetViewMatrix();
@@ -1292,7 +1568,8 @@ glm::vec3 ComputeEyePos() {
         return eye;
     }
     if (currentZone == 3 && gEnergia.active && gMinigameCamLocked) {
-        return glm::vec3(2.8f, 2.0f, 8.5f);
+        float backDist = (SimonActiveButtons() == 4) ? 2.4f : 2.8f;
+        return SimonClusterCenter() + glm::vec3(-backDist, 0.05f, 0.0f);
     }
     if (cameraMode == CAM_FREE) return camera.Position;
     glm::vec3 fwd = glm::vec3(sinf(glm::radians(player.yaw)), 0.0f, cosf(glm::radians(player.yaw)));
@@ -1334,10 +1611,15 @@ void UpdateCharacter(float dt) {
                       (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
         float speed = player.walkSpeed * (sprint ? player.sprintMult : 1.0f);
 
-        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * speed * dt; player.isWalking = true; }
-        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * speed * dt; player.isWalking = true; }
-        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; }
-        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; }
+        glm::vec2 in(0.0f);
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { movement += fwd * speed * dt; player.isWalking = true; in.y += 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { movement -= fwd * speed * dt; player.isWalking = true; in.y -= 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { player.yaw += player.turnSpeed * dt; in.x -= 1.0f; }
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { player.yaw -= player.turnSpeed * dt; in.x += 1.0f; }
+        // Lerp suave del joystick hacia el input para que el puntito no
+        // brinque, y vuelva al centro al soltar.
+        gMoveInput   = gMoveInput * 0.7f + in * 0.3f;
+        gIsSprinting = sprint && player.isWalking;
 
         player.isSprinting = sprint && player.isWalking;
 
@@ -1413,7 +1695,8 @@ bool Update() {
     // gigantesco en el yaw del jugador.
     static bool prevWantCursor = false;
     bool wantCursor = (menuState != MENU_NONE) ||
-                      (currentZone == 3 && gEnergia.active && gMinigameCamLocked);
+                      (currentZone == 3 && gEnergia.active && gMinigameCamLocked) ||
+                      gCursorReleased;
     if (wantCursor != prevWantCursor) {
         glfwSetInputMode(window, GLFW_CURSOR,
                          wantCursor ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
@@ -1447,15 +1730,16 @@ bool Update() {
         if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
         if (currentZone == 1 && gEspectro.active)    UpdateEspectroGame(deltaTime);
         if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
+        if (currentZone == 4 && gHamburguesa.active) UpdateHamburguesaGame(deltaTime);
     }
 
     // Resetear luces extras por defecto
     if (gLights.size() > 2) gLights[2].Power = glm::vec4(0.0f);
     if (gLights.size() > 3) gLights[3].Power = glm::vec4(0.0f);
     if (gLights.size() > 4) gLights[4].Power = glm::vec4(0.0f);
-    // Botones Simon de ENERGIA (slots 5..8) apagados salvo cuando estemos
+    // Botones Simon de ENERGIA (slots 5..10) apagados salvo cuando estemos
     // dentro de la zona correspondiente y se reactiven mas abajo.
-    for (size_t i = 5; i < gLights.size() && i < 9; ++i) {
+    for (size_t i = 5; i < gLights.size() && i < 11; ++i) {
         gLights[i].Power = glm::vec4(0.0f);
     }
 
@@ -1509,13 +1793,17 @@ bool Update() {
             // Botones Simon: brillo proporcional a buttonGlow + halo base
             // suave para que siempre se vean encendidos cuando estes en la
             // zona (el minijuego los pulsa cuando suenan en la secuencia o
-            // cuando el jugador los presiona).
-            for (int i = 0; i < 4 && (size_t)(5 + i) < gLights.size(); ++i) {
-                float glow = gEnergia.buttonGlow[i];
-                float ambient = 0.5f + 0.15f * sinf(t * 1.5f + i);
-                float power = ambient + glow * 5.0f;
-                gLights[5 + i].Position = SIMON_BUTTON_POSITIONS[i];
-                gLights[5 + i].Power = glm::vec4(power);
+            // cuando el jugador los presiona). Numero de slots = activos.
+            {
+                int nSimon = SimonActiveButtons();
+                for (int i = 0; i < nSimon && (size_t)(5 + i) < gLights.size(); ++i) {
+                    float glow = gEnergia.buttonGlow[i];
+                    float ambient = 0.5f + 0.15f * sinf(t * 1.5f + i);
+                    float power = ambient + glow * 5.0f;
+                    gLights[5 + i].Position = SimonButtonPos(i);
+                    gLights[5 + i].Color = SIMON_COLORS[i];
+                    gLights[5 + i].Power = glm::vec4(power);
+                }
             }
             break;
 
@@ -1581,29 +1869,37 @@ bool Update() {
     int alphaMetal = 128;
 
 
-    // Dibuja la puerta dorada PUERTA_MODELO en el centro de la hitbox dada,
-    // con un pulso de brillo ambiental + boost cuando el jugador se acerca.
-    // Se usa tanto para las 4 puertas del HUB como para las puertas de
-    // retorno de cada zona habitable (asi todas las zonas tienen un
-    // marcador visible donde se activa el teletransporte).
-    // doorIdx se usa para leer doorOpenAmount y deslizar la puerta hacia
-    // arriba cuando el jugador la dispara (apertura tipo blast-door).
+    // Dibuja PUERTA_MODELO en el centro de la hitbox dada con un pulso
+    // de brillo ambiental + boost cuando el jugador se acerca. Se usa
+    // tanto para las 4 puertas del HUB como para las puertas de retorno
+    // de cada zona habitable, asi todas las zonas tienen un marcador
+    // visible donde se activa el teletransporte. doorIdx se usa para
+    // leer doorOpenAmount y deslizar la puerta hacia arriba cuando el
+    // jugador la dispara (apertura tipo blast-door).
+    //
+    // Tinte ACERO FRIO (azul-gris): la textura de la puerta es metal gris
+    // neutro pero las luces de la sala son calidas (HUB: blanco-amarillento,
+    // ENERGIA: naranja del reactor). Si dejamos el tinte blanco, esas luces
+    // lo "doran". Empujamos el material hacia frio (mas azul que rojo) para
+    // compensar y mantener una lectura clara de "puerta de metal" sin tono
+    // dorado. Tambien limitamos el pulso (max 1.3x) para que el tone mapping
+    // ACES no presione zonas brillantes hacia el ambar.
     auto DrawZoneDoor = [&](int doorIdx, const ZoneDoor& d, float doorYaw) {
         if (!PUERTA_MODELO) return;
-        float pulseGlobal = 0.85f + 0.15f * sinf(t * 2.2f);
+        float pulseGlobal = 0.80f + 0.12f * sinf(t * 2.2f);
         float dx = player.position.x - d.center.x;
         float dz = player.position.z - d.center.z;
         float dist2 = dx * dx + dz * dz;
-        // Brillo cercano: hasta 1.7x cuando el jugador esta encima.
+        // Brillo cercano: hasta 1.3x cuando el jugador esta encima.
         // (`near`/`far` son macros de windef.h, no usar como variables)
         float proximity = glm::clamp(1.0f - dist2 / 9.0f, 0.0f, 1.0f);
-        float pulse = pulseGlobal * (1.0f + proximity * 0.7f);
+        float pulse = pulseGlobal * (1.0f + proximity * 0.45f);
 
-        glm::vec4 doorAmb  = glm::vec4(0.25f, 0.20f, 0.08f, 1.0f) * pulse;
-        glm::vec4 doorDiff = glm::vec4(0.95f, 0.78f, 0.30f, 1.0f) * pulse;
-        glm::vec4 doorSpec = glm::vec4(0.60f, 0.55f, 0.30f, 1.0f);
+        glm::vec4 doorAmb  = glm::vec4(0.10f, 0.13f, 0.18f, 1.0f) * pulse;
+        glm::vec4 doorDiff = glm::vec4(0.55f, 0.62f, 0.78f, 1.0f) * pulse;
+        glm::vec4 doorSpec = glm::vec4(0.55f, 0.62f, 0.80f, 1.0f);
         phongShader->use();
-        SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 64);
+        SetMaterial(phongShader, doorAmb, doorDiff, doorSpec, 48);
 
         // Suavizado (smoothstep) en la subida: arranque y final mas suaves
         // que un lerp lineal, da sensacion de servo mecanico.
@@ -1848,24 +2144,11 @@ bool Update() {
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
         if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
 
-        // ====== CAJAS INTERACTIVAS CON RESTRICCIONES MANUALES ======
-        if (CAJA_MODELO) {
-            SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
-            for (int i = 0; i < 5; i++) {
-                glm::mat4 m(1.0f);
-                m = glm::translate(m, interactiveBoxes[i].position);
-                m = glm::rotate(m, interactiveBoxes[i].rotationY, glm::vec3(0.0f, 1.0f, 0.0f));
-                m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-                // Escala base ajustada a 0.5f, multiplicada por su escala interactiva
-                m = glm::scale(m, glm::vec3(0.5f * interactiveBoxes[i].scale));
-
-                phongShader->setMat4("model", m);
-                CAJA_MODELO->Draw(*phongShader);
-            }
-        }
-
-        // ====== MINIJUEGO RECICLAJE (items + botes) ======
-        if (gReciclaje.active) DrawReciclajeGame(projection, view);
+        // ====== CAJAS INTERACTIVAS Y MINIJUEGO RECICLAJE: DESHABILITADOS ======
+        // El usuario pidio retirar temporalmente las 5 cajas que se mueven y
+        // el minijuego de clasificar desechos. Conservamos la sala (modelo
+        // RECICLAJE_OPACO/METAL) y las estructuras de datos por si se quiere
+        // reactivar mas adelante; solo se omiten el dibujo y los controles.
 
         // Puerta de retorno al HUB (zoneDoors[5], borde oeste del modulo)
         DrawZoneDoor(5, zoneDoors[5], RETURN_DOOR_YAW[1]);
@@ -1891,6 +2174,13 @@ bool Update() {
     case 4: // CAPSULAS
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (CAPSULAS_OPACO) CAPSULAS_OPACO->Draw(*phongShader);
+
+        // ====== MINIJUEGO HAMBURGUESA (mesa de practicas) ======
+        // Dibujamos la pila si el minijuego esta activo O si la comida ya
+        // quedo preparada (la hamburguesa terminada se queda visible como
+        // prueba de la tarea cumplida).
+        if (gHamburguesa.active || gStats.foodPrepared || gHamburguesa.step > 0)
+            DrawHamburguesaGame(projection, view);
 
         // Puerta de retorno al HUB (zoneDoors[7], borde este del modulo)
         DrawZoneDoor(7, zoneDoors[7], RETURN_DOOR_YAW[3]);
@@ -2064,6 +2354,10 @@ void DrawControlsOverlay() {
         { "Ir a zona (HUB..Capsulas)","0 1 2 3 4" },
         { "Dificultad zona",          "5 / 6 / 7" },
         { "Recorrido: siguiente paso","N" },
+        { "Manual del Astronauta",    "Q" },
+        { "Liberar / recapturar mouse","ALT" },
+        { "Preparar comida (capsulas)",  "B" },
+        { "Capas hamburguesa (capsulas)", "5 6 U I O P" },
         { "Salir / interrumpir minijuego", "TAB" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
@@ -2103,6 +2397,87 @@ static void WorldToMap(float wx, float wz, float mapX, float mapY,
     // queremos que el norte (-z) este arriba, asi que invertimos v.
     outX = mapX + u * mapW;
     outY = mapY + (1.0f - v) * mapH;
+}
+
+// Joystick virtual: circulo grande (base) + punto interior (stick) que se
+// desplaza segun gMoveInput. Encima muestra etiqueta de SPRINT cuando se
+// corre. Se dibuja como cuadrados aproximando un anillo (no tenemos primitive
+// para circulos, asi que dibujamos 24 segmentos radiales). Pequenio,
+// abajo-izquierda, justo debajo del panel de instrucciones.
+void DrawJoystick() {
+    if (!gText || !gText->ready) return;
+
+    const float r = 38.0f;                   // radio del aro exterior
+    // Esquina inferior derecha, ARRIBA del bloque de barras (las barras
+    // ocupan ~y=18..110). Subimos el joystick a y=180 para que no se
+    // empalme. El minimapa esta en la parte superior-derecha, asi que el
+    // joystick queda en el hueco vertical libre del lado derecho.
+    const float cx = SCR_WIDTH - 80.0f;
+    const float cy = 195.0f;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Fondo cuadrado tras el joystick (panel oscuro con bracket).
+    float pad = 14.0f;
+    float bx = cx - r - pad, by = cy - r - pad;
+    float bw = (r + pad) * 2.0f, bh = (r + pad) * 2.0f + 14.0f;
+    DrawQuad2D(bx + 3.0f, by - 3.0f, bw, bh, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+    DrawQuad2D(bx, by, bw, bh, glm::vec4(0.05f, 0.10f, 0.18f, 0.82f));
+    DrawQuad2D(bx, by + bh - 3.0f, bw, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(bx, by, bw, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+
+    // Aro circular aproximado con 36 quads tangenciales (tickmarks).
+    const int NSEG = 36;
+    for (int i = 0; i < NSEG; ++i) {
+        float a = (float)i / NSEG * 6.2831853f;
+        float px = cx + cosf(a) * r;
+        float py = cy + sinf(a) * r;
+        float alpha = (i % 9 == 0) ? 1.0f : 0.55f;
+        glm::vec4 col(0.55f, 0.75f, 1.0f, alpha);
+        DrawQuad2D(px - 1.5f, py - 1.5f, 3.0f, 3.0f, col);
+    }
+    // Cruz interior tenue (referencia de centro).
+    DrawQuad2D(cx - r + 4.0f, cy - 0.5f, (r * 2.0f) - 8.0f, 1.0f,
+               glm::vec4(0.55f, 0.75f, 1.0f, 0.20f));
+    DrawQuad2D(cx - 0.5f, cy - r + 4.0f, 1.0f, (r * 2.0f) - 8.0f,
+               glm::vec4(0.55f, 0.75f, 1.0f, 0.20f));
+
+    // Etiquetas W/A/S/D alrededor del aro.
+    gText->RenderText("W", cx - 6.0f,  cy + r - 2.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("S", cx - 6.0f,  cy - r - 14.0f, 0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("A", cx - r - 14.0f, cy - 8.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+    gText->RenderText("D", cx + r + 4.0f,  cy - 8.0f,  0.36f, glm::vec3(0.75f, 0.92f, 1.0f));
+
+    // Stick (punto interior). Mapea gMoveInput.x al desplazamiento horizontal
+    // y gMoveInput.y al vertical (positivo Y = arriba = W).
+    float sx = cx + glm::clamp(gMoveInput.x, -1.0f, 1.0f) * (r * 0.65f);
+    float sy = cy + glm::clamp(gMoveInput.y, -1.0f, 1.0f) * (r * 0.65f);
+    float stickR = gIsSprinting ? 9.0f : 7.0f;
+    // Halo
+    glm::vec4 halo = gIsSprinting
+        ? glm::vec4(1.0f, 0.65f, 0.20f, 0.45f)
+        : glm::vec4(0.40f, 0.80f, 1.0f, 0.35f);
+    DrawQuad2D(sx - stickR - 3.0f, sy - stickR - 3.0f,
+               (stickR + 3.0f) * 2.0f, (stickR + 3.0f) * 2.0f, halo);
+    // Cuerpo del stick
+    glm::vec4 body = gIsSprinting
+        ? glm::vec4(1.0f, 0.78f, 0.30f, 1.0f)
+        : glm::vec4(0.65f, 0.95f, 1.0f, 1.0f);
+    DrawQuad2D(sx - stickR, sy - stickR, stickR * 2.0f, stickR * 2.0f, body);
+    // Reflejo
+    DrawQuad2D(sx - stickR + 2.0f, sy + stickR - 4.0f, stickR, 2.0f,
+               glm::vec4(1.0f, 1.0f, 1.0f, 0.7f));
+
+    // Pie con estado: caminando / corriendo / quieto.
+    const char* state = "QUIETO";
+    glm::vec3 stateCol(0.70f, 0.78f, 0.92f);
+    if (gIsSprinting) { state = "SPRINT"; stateCol = glm::vec3(1.0f, 0.78f, 0.30f); }
+    else if (glm::length(gMoveInput) > 0.1f) { state = "CAMINA"; stateCol = glm::vec3(0.65f, 0.95f, 1.0f); }
+    gText->RenderText(state, bx + (bw - 50.0f) * 0.5f, by + 6.0f, 0.36f, stateCol);
+
+    glEnable(GL_DEPTH_TEST);
 }
 
 void DrawMinimap() {
@@ -2254,7 +2629,7 @@ static std::vector<std::string> BuildHelpLines() {
     if (d <= DIFF_EASY) {
         out.push_back("WASD para moverte  |  Shift correr  |  Espacio saltar");
         out.push_back("ESC abre el menu  |  TAB oculta el mapa");
-        out.push_back("Camina a una puerta dorada para teletransportarte");
+        out.push_back("Camina a una puerta luminosa para teletransportarte");
     }
 
     switch (currentZone) {
@@ -2272,15 +2647,20 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
         break;
     case 2: // RECICLAJE
-        out.push_back("O/L rota | U/J Y/H I/K mueven cajas | T/G escala | R reset");
-        if (d <= DIFF_EASY) out.push_back("Cada caja tiene un control distinto; experimenta con cada una");
+        out.push_back("Zona libre: el minijuego de clasificacion esta desactivado de momento");
+        if (d <= DIFF_EASY) out.push_back("Puedes recorrer la sala y volver al HUB por la puerta luminosa");
         break;
     case 3: // ENERGIA
-        out.push_back("B = iniciar partida Simon  |  Z X C V = botones (en orden del patron)");
-        if (d <= DIFF_EASY) out.push_back("Memoriza la secuencia de colores y repitela");
+        out.push_back("B = iniciar Simon (la camara se fija a la pila)  |  Clic en la membrana o Z X C V (N M en MEDIO/EXPERTO)");
+        if (d <= DIFF_EASY)   out.push_back("PRINCIPIANTE = 4 placas, MEDIO/EXPERTO = 6 placas (mas largo en EXPERTO)");
+        if (d <= DIFF_EASY)   out.push_back("Memoriza el orden de las luces sobre los botones y repitelo");
+        if (d <= DIFF_EASY)   out.push_back("Llega a Nivel 3 para estabilizar el reactor (Energia al 100%)");
         break;
     case 4: // CAPSULAS
-        if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta dorada");
+        out.push_back("B = arma la hamburguesa en la mesa de practicas  |  5 6 U I O P apilan las capas en orden");
+        if (d <= DIFF_EASY) out.push_back("Receta: pan inferior -> carne -> queso -> jitomate -> lechuga -> pan superior");
+        if (d <= DIFF_EASY) out.push_back("FACIL no tiene reloj; MEDIO/EXPERTO te ponen tiempo para servir la torta");
+        if (d <= DIFF_EASY) out.push_back("Requiere haber regado las plantas del invernadero (cultivos frescos)");
         break;
     }
 
@@ -2292,9 +2672,28 @@ static std::vector<std::string> BuildHelpLines() {
     return out;
 }
 
+// Pistas minimas siempre visibles cuando el panel esta colapsado. Son las
+// teclas esenciales para no quedar atrapado y reciben adaptaciones por zona.
+static std::vector<std::string> BuildCompactHelpLines() {
+    std::vector<std::string> out;
+    out.push_back("WASD mover  |  Shift correr  |  Espacio saltar  |  ESC menu");
+    const char* zoneHint = "";
+    switch (currentZone) {
+        case 0: zoneHint = "HUB: camina a una puerta luminosa para entrar a un modulo";        break;
+        case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
+        case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
+        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
+        case 4: zoneHint = "CAPSULAS: B inicia armar la hamburguesa  |  5 6 U I O P apilan las capas";  break;
+    }
+    out.push_back(zoneHint);
+    out.push_back("Q manual de tareas  |  H expandir ayuda  |  ALT libera mouse");
+    return out;
+}
+
 void DrawInstructionsPanel() {
     if (!gText || !gText->ready) return;
-    std::vector<std::string> lines = BuildHelpLines();
+    std::vector<std::string> lines = gHelpExpanded ? BuildHelpLines()
+                                                   : BuildCompactHelpLines();
     if (lines.empty()) return;
 
     glDisable(GL_DEPTH_TEST);
@@ -2303,18 +2702,50 @@ void DrawInstructionsPanel() {
 
     float pad = 16.0f;
     float lineH = 22.0f;
-    float panelH = lines.size() * lineH + 20.0f;
-    float panelW = 500.0f;
+    float headerH = 24.0f;
+    float panelH = lines.size() * lineH + 20.0f + headerH;
+    float panelW = gHelpExpanded ? 520.0f : 460.0f;
     float x = pad;
-    float y = pad; // esquina inferior izquierda
+    // Las barras de estatus ocupan ~y0=40 + 25 etiqueta + 18 barra + ~5 margen
+    // = hasta ~y=95. Subimos el panel para que el borde inferior quede por
+    // encima de ese bloque y nunca se empalmen.
+    float y = 110.0f;
 
-    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.78f));
-    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    // Sombra
+    DrawQuad2D(x + 3.0f, y - 3.0f, panelW, panelH, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+    // Fondo
+    DrawQuad2D(x, y, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.85f));
+    // Lineas doradas arriba y abajo
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(x, y,                 panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados
+    const float bL = 14.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(x,                  y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x,                  y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,    y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,    y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x,                  y,               bL, bT, brCol);
+    DrawQuad2D(x,                  y,               bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,    y,               bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,    y,               bT, bL, brCol);
+
+    // Encabezado con titulo y hint de expansion.
+    const char* title = gHelpExpanded ? ">> CONTROLES (expandido)"
+                                       : ">> CONTROLES (compacto)";
+    gText->RenderText(title, x + 14.0f, y + panelH - 22.0f, 0.38f,
+                      glm::vec3(0.65f, 0.95f, 1.0f));
+    gText->RenderText(gHelpExpanded ? "H ocultar" : "H expandir",
+                      x + panelW - 105.0f, y + panelH - 22.0f, 0.34f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
 
     for (size_t i = 0; i < lines.size(); ++i) {
-        float lineY = y + panelH - 20.0f - (float)i * lineH;
+        float lineY = y + panelH - 20.0f - headerH - (float)i * lineH;
+        // Sombra del texto para legibilidad sobre fondo claro.
+        gText->RenderText(lines[i], x + 14.0f + 1.0f, lineY - 1.0f, 0.40f,
+                          glm::vec3(0.0f));
         gText->RenderText(lines[i], x + 14.0f, lineY, 0.40f,
-                          glm::vec3(0.85f, 0.88f, 0.95f));
+                          glm::vec3(0.88f, 0.92f, 0.98f));
     }
     glEnable(GL_DEPTH_TEST);
 }
@@ -2406,6 +2837,305 @@ void DrawNarrativePanel() {
     glEnable(GL_DEPTH_TEST);
 }
 
+// Barras de estatus inferiores: representan la vida diaria del astronauta
+// (agua, comida, oxigeno, energia de la base, tareas). Estilo HUD sci-fi:
+// fondo oscuro tipo "consola", marco dorado, cada barra con su icono ASCII a
+// la izquierda, segmentos verticales sobre el relleno (look de barra LED),
+// sombra del texto y un pulso suave si la barra esta en zona critica (<25%).
+void DrawStatusBars() {
+    if (!gText || !gText->ready) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    struct Bar { const char* label; const char* icon; float value; glm::vec4 color; };
+    Bar bars[5] = {
+        { "AGUA",    "~",  gStats.agua,    glm::vec4(0.30f, 0.65f, 1.00f, 1.0f) },
+        { "COMIDA",  "@",  gStats.comida,  glm::vec4(1.00f, 0.55f, 0.25f, 1.0f) },
+        { "OXIGENO", "O2", gStats.oxigeno, glm::vec4(0.55f, 0.95f, 0.95f, 1.0f) },
+        { "ENERGIA", "+",  gStats.energia, glm::vec4(1.00f, 0.85f, 0.20f, 1.0f) },
+        { "TAREAS",  "*",  gStats.tareas,  glm::vec4(0.55f, 0.90f, 0.40f, 1.0f) },
+    };
+
+    const float barW   = 170.0f;
+    const float barH   = 20.0f;
+    const float gap    = 14.0f;
+    const float totalW = 5 * barW + 4 * gap;
+    float x0 = (SCR_WIDTH - totalW) * 0.5f;
+    float y0 = 40.0f;
+    float t  = (float)glfwGetTime();
+    float critPulse = 0.7f + 0.3f * sinf(t * 4.5f);
+
+    // Marco exterior tipo "consola": sombra inferior, fondo, doble linea
+    // dorada (encima y debajo) y dos "esquinas" estilo bracket.
+    float fx = x0 - 18.0f, fw = totalW + 36.0f;
+    float fy = y0 - 22.0f, fh = barH + 50.0f;
+    DrawQuad2D(fx + 4.0f, fy - 4.0f, fw, fh, glm::vec4(0.0f, 0.0f, 0.0f, 0.35f)); // sombra
+    DrawQuad2D(fx, fy, fw, fh, glm::vec4(0.04f, 0.07f, 0.13f, 0.86f));
+    DrawQuad2D(fx, fy + fh - 3.0f, fw, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(fx, fy,             fw, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados en las 4 esquinas.
+    const float bL = 16.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(fx,              fy + fh - bT, bL, bT, brCol);
+    DrawQuad2D(fx,              fy + fh - bL, bT, bL, brCol);
+    DrawQuad2D(fx + fw - bL,    fy + fh - bT, bL, bT, brCol);
+    DrawQuad2D(fx + fw - bT,    fy + fh - bL, bT, bL, brCol);
+    DrawQuad2D(fx,              fy,           bL, bT, brCol);
+    DrawQuad2D(fx,              fy,           bT, bL, brCol);
+    DrawQuad2D(fx + fw - bL,    fy,           bL, bT, brCol);
+    DrawQuad2D(fx + fw - bT,    fy,           bT, bL, brCol);
+
+    // Etiqueta del bloque arriba del marco.
+    gText->RenderText("// STATUS VITAL //", fx + 14.0f, fy + fh - 18.0f, 0.36f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
+
+    for (int i = 0; i < 5; ++i) {
+        float bx = x0 + i * (barW + gap);
+        float v  = glm::clamp(bars[i].value, 0.0f, 1.0f);
+        bool critical = v < 0.25f;
+        float alphaPulse = critical ? critPulse : 1.0f;
+
+        // Fondo de la barra (interior, casi negro).
+        DrawQuad2D(bx, y0, barW, barH, glm::vec4(0.05f, 0.07f, 0.10f, 0.95f));
+        // Borde de la barra (linea sutil del color de la categoria).
+        glm::vec4 edge = bars[i].color * 0.35f; edge.a = 0.7f;
+        DrawQuad2D(bx,              y0,            barW, 1.0f, edge);
+        DrawQuad2D(bx,              y0 + barH - 1, barW, 1.0f, edge);
+        DrawQuad2D(bx,              y0,            1.0f, barH, edge);
+        DrawQuad2D(bx + barW - 1.0f,y0,            1.0f, barH, edge);
+
+        // Relleno principal.
+        glm::vec4 fill = bars[i].color;
+        fill.a *= alphaPulse;
+        DrawQuad2D(bx + 1.0f, y0 + 1.0f, (barW - 2.0f) * v, barH - 2.0f, fill);
+        // Brillo superior (gradiente fake con un quad mas claro).
+        glm::vec4 hi = fill; hi.r = std::min(1.0f, hi.r + 0.25f);
+                              hi.g = std::min(1.0f, hi.g + 0.25f);
+                              hi.b = std::min(1.0f, hi.b + 0.25f);
+                              hi.a *= 0.55f;
+        DrawQuad2D(bx + 1.0f, y0 + barH * 0.55f, (barW - 2.0f) * v, barH * 0.40f, hi);
+        // Segmentos verticales (look de barra LED): 10 separadores oscuros.
+        for (int s = 1; s < 10; ++s) {
+            DrawQuad2D(bx + (barW / 10.0f) * s - 1.0f, y0 + 2.0f,
+                       1.0f, barH - 4.0f,
+                       glm::vec4(0.0f, 0.0f, 0.0f, 0.35f));
+        }
+
+        // Icono al inicio del label.
+        gText->RenderText(bars[i].icon, bx + 2.0f, y0 + barH + 6.0f, 0.42f,
+                          glm::vec3(bars[i].color));
+        // Etiqueta con sombra para legibilidad.
+        gText->RenderText(bars[i].label, bx + 26.0f + 1.0f, y0 + barH + 6.0f - 1.0f, 0.36f,
+                          glm::vec3(0.0f));
+        gText->RenderText(bars[i].label, bx + 26.0f, y0 + barH + 6.0f, 0.36f,
+                          glm::vec3(0.92f, 0.95f, 1.00f));
+        // Porcentaje a la derecha.
+        char pct[8];
+        snprintf(pct, sizeof(pct), "%3d%%", (int)(v * 100.0f + 0.5f));
+        glm::vec3 pctCol = critical ? glm::vec3(1.0f, 0.45f, 0.45f)
+                                    : glm::vec3(1.0f, 0.95f, 0.55f);
+        gText->RenderText(pct, bx + barW - 48.0f + 1.0f, y0 + barH + 6.0f - 1.0f, 0.36f,
+                          glm::vec3(0.0f));
+        gText->RenderText(pct, bx + barW - 48.0f, y0 + barH + 6.0f, 0.36f, pctCol);
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Widget compacto siempre visible en el borde izquierdo medio. Muestra las
+// 5 tareas con un cuadrito de paloma y el titulo abreviado. Sirve como
+// recordatorio constante de que se puede pulsar Q para ver el manual
+// completo. Estilo Genshin: panel oscuro semitransparente, marco dorado en
+// las esquinas (brackets), barra de progreso global, paloma verde con check
+// real y tarea actual resaltada con un >>.
+void DrawQuestsWidget() {
+    if (!gText || !gText->ready) return;
+
+    struct Mini { const char* title; bool done; };
+    Mini quests[5] = {
+        { "Regar plantas",       gStats.plantsWatered },
+        { "Catalogar cometa",    gStats.cometDone     },
+        { "Visitar almacen",     gStats.recycleDone   },
+        { "Estabilizar reactor", gStats.simonDone     },
+        { "Armar hamburguesa",   gStats.foodPrepared  },
+    };
+    int doneCount = 0;
+    int firstPending = -1;
+    for (int i = 0; i < 5; ++i) {
+        if (quests[i].done) doneCount++;
+        else if (firstPending < 0) firstPending = i;
+    }
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const float panelW  = 260.0f;
+    const float headerH = 50.0f;
+    const float rowH    = 24.0f;
+    const float panelH  = headerH + 5 * rowH + 18.0f;
+    const float x = 12.0f;
+    const float y = (SCR_HEIGHT - panelH) * 0.55f;
+
+    // Sombra del panel.
+    DrawQuad2D(x + 4.0f, y - 4.0f, panelW, panelH, glm::vec4(0.0f, 0.0f, 0.0f, 0.40f));
+    // Fondo con dos tonos verticales para dar sensacion de gradiente.
+    DrawQuad2D(x, y, panelW, panelH * 0.5f,
+               glm::vec4(0.06f, 0.10f, 0.18f, 0.88f));
+    DrawQuad2D(x, y + panelH * 0.5f, panelW, panelH * 0.5f,
+               glm::vec4(0.04f, 0.07f, 0.14f, 0.88f));
+    // Linea horizontal dorada superior + inferior.
+    DrawQuad2D(x, y + panelH - 3.0f, panelW, 3.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.95f));
+    DrawQuad2D(x, y,                 panelW, 2.0f, glm::vec4(0.92f, 0.78f, 0.35f, 0.55f));
+    // Brackets dorados en las 4 esquinas.
+    const float bL = 16.0f, bT = 3.0f;
+    glm::vec4 brCol(1.0f, 0.85f, 0.30f, 0.95f);
+    DrawQuad2D(x,                 y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x,                 y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,   y + panelH - bT, bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,   y + panelH - bL, bT, bL, brCol);
+    DrawQuad2D(x,                 y,               bL, bT, brCol);
+    DrawQuad2D(x,                 y,               bT, bL, brCol);
+    DrawQuad2D(x + panelW - bL,   y,               bL, bT, brCol);
+    DrawQuad2D(x + panelW - bT,   y,               bT, bL, brCol);
+
+    // Encabezado: titulo (tipografia mayor) + contador done/5
+    char header[48];
+    snprintf(header, sizeof(header), "TAREAS  %d/5", doneCount);
+    gText->RenderText(">> MANUAL", x + 14.0f, y + panelH - 22.0f, 0.34f,
+                      glm::vec3(0.65f, 0.95f, 1.0f));
+    gText->RenderText(header, x + 14.0f, y + panelH - 42.0f, 0.46f,
+                      glm::vec3(1.0f, 0.95f, 0.55f));
+    gText->RenderText("Q expandir", x + panelW - 110.0f, y + panelH - 22.0f, 0.32f,
+                      glm::vec3(0.65f, 0.72f, 0.85f));
+
+    // Barra de progreso global (fina, encima de la lista).
+    float pgX = x + 14.0f, pgY = y + panelH - headerH - 4.0f;
+    float pgW = panelW - 28.0f, pgH = 4.0f;
+    DrawQuad2D(pgX, pgY, pgW, pgH, glm::vec4(0.10f, 0.13f, 0.18f, 0.9f));
+    float frac = doneCount / 5.0f;
+    DrawQuad2D(pgX, pgY, pgW * frac, pgH, glm::vec4(0.55f, 0.95f, 0.55f, 1.0f));
+
+    // Filas: chip + titulo. Verde con OK si completa; gris con > si es la
+    // siguiente pendiente; gris suave en las demas.
+    for (int i = 0; i < 5; ++i) {
+        float ry = y + panelH - headerH - 14.0f - (i + 1) * rowH + 4.0f;
+
+        // Fondo de fila zebra y resaltado para la pendiente actual.
+        if (i == firstPending) {
+            DrawQuad2D(x + 8.0f, ry - 2.0f, panelW - 16.0f, rowH - 2.0f,
+                       glm::vec4(1.0f, 0.85f, 0.30f, 0.12f));
+        } else if (i % 2 == 0) {
+            DrawQuad2D(x + 8.0f, ry - 2.0f, panelW - 16.0f, rowH - 2.0f,
+                       glm::vec4(1.0f, 1.0f, 1.0f, 0.03f));
+        }
+
+        // Casilla con paloma o cuadrito vacio.
+        glm::vec4 chkBg = quests[i].done
+            ? glm::vec4(0.30f, 0.85f, 0.40f, 1.0f)
+            : glm::vec4(0.20f, 0.22f, 0.28f, 1.0f);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 14.0f, 14.0f, chkBg);
+        // Borde claro del cuadro
+        glm::vec4 chkB = quests[i].done
+            ? glm::vec4(0.65f, 1.0f, 0.65f, 1.0f)
+            : glm::vec4(0.55f, 0.60f, 0.70f, 1.0f);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 14.0f, 1.0f, chkB);
+        DrawQuad2D(x + 14.0f, ry + 17.0f, 14.0f, 1.0f, chkB);
+        DrawQuad2D(x + 14.0f, ry + 4.0f, 1.0f, 14.0f, chkB);
+        DrawQuad2D(x + 27.0f, ry + 4.0f, 1.0f, 14.0f, chkB);
+        // "X" dentro del cuadrito si esta completado (dos quads en diagonal).
+        if (quests[i].done) {
+            // Marca de check: dos trazos formando un tick.
+            DrawQuad2D(x + 17.0f, ry + 9.0f, 5.0f, 1.5f,
+                       glm::vec4(0.05f, 0.20f, 0.05f, 1.0f));
+            DrawQuad2D(x + 20.0f, ry + 6.0f, 1.5f, 9.0f,
+                       glm::vec4(0.05f, 0.20f, 0.05f, 1.0f));
+        }
+
+        // Flecha de "tarea actual"
+        if (i == firstPending) {
+            gText->RenderText(">", x + 36.0f, ry + 2.0f, 0.38f,
+                              glm::vec3(1.0f, 0.85f, 0.30f));
+        }
+
+        glm::vec3 col = quests[i].done
+            ? glm::vec3(0.62f, 0.92f, 0.62f)
+            : (i == firstPending ? glm::vec3(1.0f, 0.95f, 0.65f)
+                                  : glm::vec3(0.78f, 0.83f, 0.92f));
+        gText->RenderText(quests[i].title, x + 48.0f, ry + 2.0f, 0.36f, col);
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
+// Manual del aventurero (estilo Genshin): lista de tareas/minijuegos con
+// paloma cuando se completan. Se abre con Q.
+void DrawQuestsMenu() {
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    DrawQuad2D(0.0f, 0.0f, (float)SCR_WIDTH, (float)SCR_HEIGHT,
+               glm::vec4(0.0f, 0.0f, 0.05f, 0.72f));
+
+    float panelW = 620.0f, panelH = 460.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (SCR_HEIGHT - panelH) * 0.5f;
+    DrawQuad2D(panelX, panelY, panelW, panelH, glm::vec4(0.05f, 0.10f, 0.18f, 0.94f));
+    DrawQuad2D(panelX, panelY + panelH - 4.0f, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+    DrawQuad2D(panelX, panelY, panelW, 4.0f, glm::vec4(0.92f, 0.78f, 0.35f, 1.0f));
+
+    float cx = SCR_WIDTH * 0.5f;
+    DrawTextCentered("MANUAL DEL ASTRONAUTA", cx, panelY + panelH - 60.0f, 0.90f,
+                     glm::vec3(0.95f, 0.82f, 0.35f));
+    DrawTextCentered("Tareas diarias en la base sustentable",
+                     cx, panelY + panelH - 95.0f, 0.45f,
+                     glm::vec3(0.75f, 0.80f, 0.90f));
+
+    struct Quest { const char* title; const char* hint; bool done; };
+    Quest quests[5] = {
+        { "Regar las plantas (Invernadero)",        "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
+        { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
+        { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
+        { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
+        { "Armar la hamburguesa (Capsulas)",         "B + receta 5 6 U I O P en orden", gStats.foodPrepared },
+    };
+
+    float yTop = panelY + panelH - 140.0f;
+    float lineH = 56.0f;
+    float labelX = panelX + 60.0f;
+
+    for (int i = 0; i < 5; ++i) {
+        float y = yTop - i * lineH;
+        DrawQuad2D(panelX + 30.0f, y - 16.0f, panelW - 60.0f, lineH - 8.0f,
+                   glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
+        // Cuadrito de paloma
+        glm::vec4 chk = quests[i].done
+            ? glm::vec4(0.45f, 0.90f, 0.45f, 1.0f)
+            : glm::vec4(0.30f, 0.30f, 0.38f, 1.0f);
+        DrawQuad2D(panelX + 36.0f, y + 4.0f, 18.0f, 18.0f, chk);
+        if (gText && gText->ready) {
+            if (quests[i].done) {
+                gText->RenderText("OK", panelX + 38.0f, y + 6.0f, 0.34f,
+                                  glm::vec3(0.10f, 0.20f, 0.10f));
+            }
+            glm::vec3 titleCol = quests[i].done
+                ? glm::vec3(0.65f, 0.95f, 0.65f)
+                : glm::vec3(0.92f, 0.95f, 1.00f);
+            gText->RenderText(quests[i].title, labelX + 8.0f, y + 12.0f, 0.50f, titleCol);
+            gText->RenderText(quests[i].hint,  labelX + 8.0f, y - 10.0f, 0.36f,
+                              glm::vec3(0.60f, 0.66f, 0.78f));
+        }
+    }
+
+    DrawTextCentered("Pulsa Q o ESC para cerrar", cx, panelY + 22.0f, 0.40f,
+                     glm::vec3(0.55f, 0.60f, 0.70f));
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawHud() {
     if (!hudShader) return;
     // El HUD usa proyeccion ortografica que el callback de resize mantiene
@@ -2413,6 +3143,10 @@ void DrawHud() {
     // dibuja segun el estado del menu.
     if (menuState == MENU_CONTROLS) {
         DrawControlsOverlay();
+        return;
+    }
+    if (menuState == MENU_QUESTS) {
+        DrawQuestsMenu();
         return;
     }
     if (menuState == MENU_PAUSE) {
@@ -2423,9 +3157,14 @@ void DrawHud() {
     // HUD en juego (menu cerrado)
     DrawMinimap();
     DrawInstructionsPanel();
+    DrawStatusBars();
+    DrawQuestsWidget();
+    DrawJoystick();
     DrawZoneBanner();
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
+    if (gEnergia.active)  DrawEnergiaHUD();
+    if (gHamburguesa.active) DrawHamburguesaHUD();
 }
 
 // ============ INPUT & CONTROLES ============
@@ -2439,12 +3178,59 @@ void processInput(GLFWwindow* window) {
             menuSelection = 0;
         } else if (menuState == MENU_PAUSE) {
             menuState = MENU_NONE;
+        } else if (menuState == MENU_QUESTS) {
+            // El manual es independiente del menu de pausa: ESC lo cierra de
+            // golpe en vez de regresar a la pausa, que no fue la pantalla
+            // previa.
+            menuState = MENU_NONE;
         } else {
             menuState = MENU_PAUSE; // desde un sub-menu, vuelve a pausa
             menuSelection = 0;
         }
     }
     keyEscLast = escNow;
+
+    // --- Q: Manual del Astronauta (toggle global, abre y cierra) ---
+    // Se procesa antes del early-return del menu para que Q tambien sirva
+    // para cerrar el manual una vez abierto. Si hay otro menu activo, Q lo
+    // reemplaza por el manual.
+    static bool keyQLast = false;
+    bool qNow = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
+    if (qNow && !keyQLast) {
+        if (menuState == MENU_QUESTS) {
+            menuState = MENU_NONE;
+        } else {
+            menuState = MENU_QUESTS;
+            menuSelection = 0;
+        }
+    }
+    keyQLast = qNow;
+
+    // --- ALT: libera / recaptura el mouse (cursor visible para mover la
+    // ventana o hacer alt-tab sin que la camara se vuelva loca). Se procesa
+    // antes del early-return para que tambien funcione con un menu abierto.
+    static bool keyAltLast = false;
+    bool altNow = (glfwGetKey(window, GLFW_KEY_LEFT_ALT)  == GLFW_PRESS) ||
+                  (glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
+    if (altNow && !keyAltLast) {
+        gCursorReleased = !gCursorReleased;
+        PushNarrative(gCursorReleased
+                      ? "Mouse liberado (ALT para recapturarlo)."
+                      : "Mouse recapturado.");
+    }
+    keyAltLast = altNow;
+
+    // --- H: expande / colapsa el panel de controles ---
+    // Solo activo si el menu esta cerrado para no chocar con otras teclas.
+    static bool keyHLast = false;
+    bool hNow = glfwGetKey(window, GLFW_KEY_H) == GLFW_PRESS;
+    // En invernadero H tambien es la tecla para "regar maceta izq". El OSU
+    // solo lee H cuando esta active; aqui priorizamos el toggle solo si NO
+    // estamos jugando OSU (asi no interrumpimos el ritmo).
+    if (hNow && !keyHLast && menuState == MENU_NONE && !gInvernadero.active) {
+        gHelpExpanded = !gHelpExpanded;
+    }
+    keyHLast = hNow;
 
     // --- Si el menu esta abierto, solo navegacion del menu ---
     if (menuState != MENU_NONE) {
@@ -2738,69 +3524,11 @@ void processInput(GLFWwindow* window) {
     // - Rotacion con O/L (mientras esten libres no choquen con el OSU de invernadero)
     // - Reset con R
     // La logica de separar items (metal/vidrio/carton) se deja COMENTADA y lista.
-    if (currentZone == 2) {
-        float boxSpeed = 2.5f * deltaTime;
-
-        // B = iniciar el modulo de reciclaje (activa items y narrativa)
-        bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
-        if (bKey && !keyBLast) {
-            InitReciclajeGame();
-            gReciclaje.active = true;
-            PushNarrative("RECICLAJE: ordena los desechos segun el tipo de material.");
-            PushNarrative("Pulsa TAB para cambiar de caja e I J K L para moverla.");
-            std::cout << "[Reciclaje] Nueva partida (dificultad " << gReciclaje.difficulty << ")" << std::endl;
-        }
-        keyBLast = bKey;
-
-        bool tabKey = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
-        if (tabKey && !keyTabLast) {
-            gReciclaje.selectedBox = (gReciclaje.selectedBox + 1) % 5;
-            std::cout << "[Reciclaje] Caja activa: " << gReciclaje.selectedBox << std::endl;
-        }
-        keyTabLast = tabKey;
-
-        int s = gReciclaje.selectedBox;
-        InteractiveBox& box = interactiveBoxes[s];
-
-        // Movimiento en los 3 ejes para la caja seleccionada
-        if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS) box.position.z -= boxSpeed; // adelante
-        if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) box.position.z += boxSpeed; // atras
-        if (glfwGetKey(window, GLFW_KEY_J) == GLFW_PRESS) box.position.x -= boxSpeed; // izquierda
-        if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS) box.position.x += boxSpeed; // derecha
-        if (glfwGetKey(window, GLFW_KEY_U) == GLFW_PRESS) box.position.y += boxSpeed; // sube
-        if (glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS) box.position.y -= boxSpeed; // baja
-        if (box.position.y < 0.0f) box.position.y = 0.0f;
-        if (box.position.y > 3.0f) box.position.y = 3.0f;
-
-        // Rotacion y escala de la caja seleccionada
-        if (glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS) box.rotationY -= boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_PERIOD) == GLFW_PRESS) box.rotationY += boxSpeed;
-        if (glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS) box.scale -= 1.0f * deltaTime;
-        if (glfwGetKey(window, GLFW_KEY_G) == GLFW_PRESS) box.scale += 1.0f * deltaTime;
-
-        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
-            for (int i = 0; i < 5; ++i) {
-                interactiveBoxes[i].position = interactiveBoxes[i].startPos;
-                interactiveBoxes[i].rotationY = 0.0f;
-                interactiveBoxes[i].scale = 1.0f;
-            }
-        }
-
-        // ---- INTERACCION SEPARAR BASURA (DEJADA LISTA, COMENTADA) ----
-        // Idea: el usuario deberá tomar (raycast/clic) cada item y depositarlo en el
-        // bote correspondiente. Por ahora dejamos el esqueleto preparado:
-        //
-        // if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        //     // 1) Hacer ray-pick contra gReciclaje.items y los botes
-        //     //    - si el item esta cerca del jugador -> gReciclaje.selectedItem = idx;
-        //     //    - si ya hay item seleccionado y se clickea un bote ->
-        //     //      MaterialType bin = gReciclaje.items[selectedItem].type
-        //     //                         == bin  -> score++  (acierto)
-        //     //                         != bin  -> score--  (fallo)
-        //     //      gReciclaje.items[selectedItem].sorted = true;
-        //     //      gReciclaje.selectedItem = -1;
-        // }
-    }
+    // ZONA 2: RECICLAJE - minijuego y cajas interactivas DESHABILITADOS.
+    // El usuario pidio retirar la mecanica de mover cajas y la clasificacion
+    // de desechos, asi que la sala queda como zona libre, sin controles
+    // propios. gStats.recycleDone se inicializa en true (ver InitRooms) para
+    // que la barra TAREAS pueda llegar al 100% solo con el espectro.
 
     // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
     if (currentZone == 3) {
@@ -2842,9 +3570,22 @@ void processInput(GLFWwindow* window) {
         if (vKey && !keyVLast) EnergiaPress(3);
         keyZLast = zKey; keyXLast = xKey; keyCLast = cKey; keyVLast = vKey;
 
-        // CLIC DEL MOUSE: cada boton Simon se proyecta a pantalla y comparamos
-        // con la posicion del cursor. Solo aceptamos clics si el juego esta
-        // en fase 2 (turno del jugador).
+        // Teclas extra para los botones 5 y 6 (solo activas en MEDIO/EXPERTO)
+        static bool keyNLast = false, keyMLast = false;
+        bool nKey = glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS;
+        bool mKey = glfwGetKey(window, GLFW_KEY_M) == GLFW_PRESS;
+        if (SimonActiveButtons() >= 6) {
+            if (nKey && !keyNLast) EnergiaPress(4);
+            if (mKey && !keyMLast) EnergiaPress(5);
+        }
+        keyNLast = nKey; keyMLast = mKey;
+
+        // CLIC DEL MOUSE: cada boton Simon (membrana sobre la pila R_1) se
+        // proyecta a pantalla y comparamos con la posicion del cursor. La
+        // camara se aleja un poco mas en el modo 6 botones para que las
+        // membranas no queden gigantes, asi mantenemos un radio fijo de
+        // ~55 px que cubre el plano sin pisar al vecino (gana la mas cerca).
+        // Solo aceptamos clics en fase 2 (turno del jugador).
         if (gEnergia.active) {
             static bool mouseLast = false;
             bool mouseNow = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
@@ -2855,9 +3596,10 @@ void processInput(GLFWwindow* window) {
                     (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 1000.0f);
                 glm::mat4 vw = ComputeView();
                 int bestIdx = -1;
-                float bestDist = 70.0f; // radio en px
-                for (int i = 0; i < 4; ++i) {
-                    glm::vec4 clip = proj * vw * glm::vec4(SIMON_BUTTON_POSITIONS[i], 1.0f);
+                float bestDist = 55.0f; // radio en px
+                int nSimon = SimonActiveButtons();
+                for (int i = 0; i < nSimon; ++i) {
+                    glm::vec4 clip = proj * vw * glm::vec4(SimonButtonPos(i), 1.0f);
                     if (clip.w <= 0.0f) continue;
                     glm::vec3 ndc = glm::vec3(clip) / clip.w;
                     float sx = (ndc.x * 0.5f + 0.5f) * SCR_WIDTH;
@@ -2873,7 +3615,53 @@ void processInput(GLFWwindow* window) {
         }
     }
 
-    // ZONA 4: CAPSULAS - zona de descanso, sin minijuego.
+    // ZONA 4: CAPSULAS - Minijuego "Armar Hamburguesa".
+    // B inicia la preparacion en la mesa de practicas. La camara se queda
+    // libre para que el jugador siga viendo la mesa mientras teclea las
+    // capas en orden (PAN INFERIOR -> CARNE -> QUESO -> JITOMATE ->
+    // LECHUGA -> PAN SUPERIOR). Al colocar la ultima capa se llenan las
+    // barras de agua y comida igual que con la version vieja del cooking
+    // timer. Requiere que las plantas ya esten regadas para mantener la
+    // misma narrativa del proyecto (cultivos frescos como insumo).
+    if (currentZone == 4) {
+        static bool keyBCapLast = false;
+        bool bCap = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bCap && !keyBCapLast && !gHamburguesa.active && !gStats.foodPrepared) {
+            if (!gStats.plantsWatered) {
+                PushNarrative("Necesitas regar las plantas del invernadero primero.");
+            } else {
+                InitHamburguesaGame();
+                gHamburguesa.active = true;
+                PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta.");
+                std::cout << "[Hamburguesa] Nueva partida (dificultad "
+                          << gHamburguesa.difficulty << ")" << std::endl;
+            }
+        }
+        keyBCapLast = bCap;
+
+        if (gHamburguesa.active) {
+            // Teclas de ingrediente. Cada tecla apila la capa correspondiente
+            // SOLO si es la que toca. Si es otra capa o ya esta colocada,
+            // cuenta como miss y rompe el combo.
+            static bool keyLast[HAMB_ING_COUNT] = { false, false, false, false, false, false };
+            for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+                bool now = glfwGetKey(window, HAMB_KEYS[i]) == GLFW_PRESS;
+                if (now && !keyLast[i]) HamburguesaPress(i);
+                keyLast[i] = now;
+            }
+
+            // TAB interrumpe el minijuego y deja el progreso parcial visible
+            // sobre la mesa (las capas ya colocadas no se borran, asi el
+            // jugador puede continuar despues con B).
+            static bool tabIntH = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntH) {
+                gHamburguesa.active = false;
+                PushNarrative("Minijuego de hamburguesa interrumpido.");
+            }
+            tabIntH = tabInt;
+        }
+    }
 }
 
 void SetLightUniforms(Shader* shader) {
@@ -2892,7 +3680,12 @@ void SetLightUniforms(Shader* shader) {
 }
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    if (width <= 0 || height <= 0) return; // ventana minimizada: ignora
     glViewport(0, 0, width, height);
+    // Actualiza SCR_WIDTH/HEIGHT para que todo el HUD se recompute (las
+    // funciones de dibujo leen estas globales cada frame).
+    SCR_WIDTH  = (unsigned int)width;
+    SCR_HEIGHT = (unsigned int)height;
     hudProjection = glm::ortho(0.0f, (float)width, 0.0f, (float)height);
     if (gText) gText->SetProjection(width, height);
 }
@@ -2901,6 +3694,7 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     float xoffset = (float)xpos - lastX; float yoffset = lastY - (float)ypos;
     lastX = (float)xpos; lastY = (float)ypos;
     if (menuState != MENU_NONE) return;
+    if (gCursorReleased) return; // ALT mantiene el cursor libre, no rotar camara
     if (gMinigameCamLocked) return; // camara fija durante minijuego
     if (cameraMode == CAM_FREE) {
         camera.ProcessMouseMovement(xoffset, yoffset);
@@ -2936,6 +3730,7 @@ void SetCurrentZoneDifficulty(Difficulty d) {
         break;
     case 2: gReciclaje.difficulty   = d; break;
     case 3: gEnergia.difficulty     = d; break;
+    case 4: gHamburguesa.difficulty = d; break;
     default: return;
     }
     std::cout << "[Zona " << currentZone << "] Dificultad: " << difLbl[(int)d] << std::endl;
@@ -3134,6 +3929,14 @@ void UpdateInvernaderoGame(float dt) {
                       << "  MaxCombo=" << gInvernadero.maxCombo << std::endl;
             reported = true;
         }
+        // Exito si acerto TODAS las notas. Marca plants_watered y desbloquea
+        // la preparacion de comida en capsulas. Solo dispara una vez por
+        // partida; el flag persiste hasta que se reinicia el minijuego.
+        if (!gStats.plantsWatered &&
+            gInvernadero.hits >= (int)gInvernadero.notes.size()) {
+            gStats.plantsWatered = true;
+            PushNarrative("Plantas regadas. Ya puedes preparar comida en CAPSULAS.");
+        }
     }
 }
 
@@ -3284,33 +4087,54 @@ void InitEnergiaGame() {
     gEnergia.phaseTimer = 0.0f;
     gEnergia.showIndex = -1;
     gEnergia.score = 0;
-    for (int i = 0; i < 4; i++) gEnergia.buttonGlow[i] = 0.0f;
+    gEnergia.hits = 0;
+    gEnergia.misses = 0;
+    gEnergia.combo = 0;
+    gEnergia.maxCombo = 0;
+    for (int i = 0; i < 6; i++) gEnergia.buttonGlow[i] = 0.0f;
 
+    // Por dificultad: cuantos botones y que tan largo arranca el patron.
+    //   PRINCIPIANTE: 4 botones, patron inicial 3 (cuadrado 2x2 clasico)
+    //   MEDIO:        6 botones, patron inicial 4
+    //   EXPERTO:      6 botones, patron inicial 8 (mas largo de entrada
+    //                 para que el reto memoria sea mucho mayor)
     int startLen;
     switch (gEnergia.difficulty) {
     case DIFF_EASY:   startLen = 3; gEnergia.level = 1; break;
     case DIFF_MEDIUM: startLen = 4; gEnergia.level = 2; break;
-    case DIFF_EXPERT: startLen = 6; gEnergia.level = 4; break;
+    case DIFF_EXPERT: startLen = 8; gEnergia.level = 4; break;
     default:          startLen = 3; gEnergia.level = 1; break;
     }
+    gEnergia.bestLevel = gEnergia.level;
+    int nBtns = SimonActiveButtons();
     srand((unsigned)(glfwGetTime() * 1000.0));
-    for (int i = 0; i < startLen; i++) gEnergia.pattern.push_back(rand() % 4);
+    for (int i = 0; i < startLen; i++) gEnergia.pattern.push_back(rand() % nBtns);
 }
 
 void EnergiaPress(int button) {
     if (!gEnergia.active) return;
     if (gEnergia.phase != 2) return; // solo se aceptan inputs en fase de jugador
+    // Validar contra los botones realmente activos (PRINCIPIANTE solo 4;
+    // si llega N/M en ese modo, los ignoramos para no romper el patron).
+    if (button < 0 || button >= SimonActiveButtons()) return;
     gEnergia.buttonGlow[button] = 1.0f;
 
     int expected = gEnergia.pattern[gEnergia.playerIndex];
     if (button == expected) {
         gEnergia.playerIndex++;
-        gEnergia.score += 50;
-        std::cout << "[Simon] OK boton " << button << "  (" << gEnergia.playerIndex
-                  << "/" << gEnergia.pattern.size() << ")" << std::endl;
+        gEnergia.hits++;
+        gEnergia.combo++;
+        if (gEnergia.combo > gEnergia.maxCombo) gEnergia.maxCombo = gEnergia.combo;
+        // Score con bonus de racha: +50 base, +5 por cada eslabon de combo.
+        gEnergia.score += 50 + gEnergia.combo * 5;
+        std::cout << "[Simon] OK boton " << SIMON_NAMES[button]
+                  << "  (" << gEnergia.playerIndex
+                  << "/" << gEnergia.pattern.size() << ")"
+                  << "  combo=" << gEnergia.combo << std::endl;
         if (gEnergia.playerIndex >= (int)gEnergia.pattern.size()) {
             gEnergia.level++;
-            gEnergia.pattern.push_back(rand() % 4);
+            if (gEnergia.level > gEnergia.bestLevel) gEnergia.bestLevel = gEnergia.level;
+            gEnergia.pattern.push_back(rand() % SimonActiveButtons());
             gEnergia.playerIndex = 0;
             gEnergia.phase = 1;            // volver a mostrar patron
             gEnergia.phaseTimer = 0.6f;     // pausa antes de mostrar
@@ -3319,26 +4143,41 @@ void EnergiaPress(int button) {
             snprintf(buf, sizeof(buf), "Patron correcto! Nivel %d. Memoriza el nuevo orden.", gEnergia.level);
             PushNarrative(buf);
             std::cout << "[Simon] NIVEL " << gEnergia.level
-                      << "  Score=" << gEnergia.score << std::endl;
+                      << "  Score=" << gEnergia.score
+                      << "  Aciertos=" << gEnergia.hits
+                      << "  MaxCombo=" << gEnergia.maxCombo << std::endl;
+            // El reactor de la estacion se da por estable al alcanzar nivel 3.
+            // Llena la barra de energia y palomea la tarea del manual.
+            if (!gStats.simonDone && gEnergia.level >= 3) {
+                gStats.simonDone = true;
+                gStats.energia   = 1.0f;
+                PushNarrative("Reactor estable. Energia de la base al 100%.");
+            }
         } else {
             PushNarrative("Vas bien, sigue la secuencia.");
         }
     }
     else {
-        char buf[100];
-        snprintf(buf, sizeof(buf), "Fallaste. Esperaba el boton %d. Score final %d.",
-                 expected, gEnergia.score);
+        gEnergia.misses++;
+        gEnergia.combo = 0;
+        char buf[120];
+        snprintf(buf, sizeof(buf),
+                 "Fallaste. Esperaba %s. Aciertos %d / Fallos %d / Score %d.",
+                 SIMON_NAMES[expected], gEnergia.hits, gEnergia.misses, gEnergia.score);
         PushNarrative(buf);
-        std::cout << "[Simon] FALLO. Esperaba " << expected
-                  << " y se presiono " << button
-                  << ".  Score final=" << gEnergia.score << std::endl;
+        std::cout << "[Simon] FALLO. Esperaba " << SIMON_NAMES[expected]
+                  << " y se presiono " << SIMON_NAMES[button]
+                  << ".  Score final=" << gEnergia.score
+                  << "  Hits=" << gEnergia.hits
+                  << "  Misses=" << gEnergia.misses
+                  << "  MaxCombo=" << gEnergia.maxCombo << std::endl;
         gEnergia.phase = 3;
         gEnergia.phaseTimer = 1.5f;
     }
 }
 
 void UpdateEnergiaGame(float dt) {
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 6; i++) {
         gEnergia.buttonGlow[i] -= dt * 2.5f;
         if (gEnergia.buttonGlow[i] < 0.0f) gEnergia.buttonGlow[i] = 0.0f;
     }
@@ -3380,38 +4219,224 @@ void UpdateEnergiaGame(float dt) {
     }
 }
 
+// HUD del minijuego Simon. Aparece solo mientras gEnergia.active == true.
+// Mantiene el mismo estilo (panel oscuro con borde dorado + texto blanco)
+// que DrawEspectroHUD para que los 4 minijuegos se sientan parte de la
+// misma familia. Muestra: nivel actual, score, hits, fallos, combo, mejor
+// racha, fase activa y el "color objetivo" durante la fase de input.
+void DrawEnergiaHUD() {
+    if (!hudShader) return;
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 540.0f;
+    if (panelW > (float)SCR_WIDTH - 80.0f) panelW = (float)SCR_WIDTH - 80.0f;
+    float panelH = 132.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (float)SCR_HEIGHT - panelH - 26.0f;
+
+    // Marco oscuro con borde dorado superior/inferior (igual que Espectro).
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, panelH + 12.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(panelX - 6.0f, panelY + panelH + 3.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Fila de chips de color (4 o 6 segun dificultad): se ilumina el que
+    // esta activo en la fase de "mostrar patron" y los pulsados por el
+    // jugador. Para no rebasar el panel cuando son 6, achicamos el ancho
+    // del chip y reducimos la separacion.
+    int nChips = SimonActiveButtons();
+    float chipW = (nChips == 4) ? 80.0f : 70.0f;
+    float chipH = 28.0f;
+    float chipGap = (nChips == 4) ? 16.0f : 10.0f;
+    float chipsTotal = chipW * (float)nChips + chipGap * (float)(nChips - 1);
+    float chipX0 = panelX + (panelW - chipsTotal) * 0.5f;
+    float chipY  = panelY + panelH - chipH - 14.0f;
+    float tNow = (float)glfwGetTime();
+    for (int i = 0; i < nChips; ++i) {
+        float glow = gEnergia.buttonGlow[i];
+        float pulse = 0.55f + 0.20f * sinf(tNow * 2.2f + i * 1.3f);
+        glm::vec4 base = SIMON_COLORS[i];
+        glm::vec4 bg(base.r * (0.35f + glow * 0.65f),
+                     base.g * (0.35f + glow * 0.65f),
+                     base.b * (0.35f + glow * 0.65f),
+                     0.55f + glow * 0.40f);
+        float cx = chipX0 + i * (chipW + chipGap);
+        DrawQuad2D(cx, chipY, chipW, chipH, bg);
+        // Borde brillante cuando glow alto.
+        float edge = glm::clamp(glow * 0.9f + 0.18f * pulse, 0.0f, 1.0f);
+        DrawQuad2D(cx, chipY + chipH - 3.0f, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        DrawQuad2D(cx, chipY, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        if (gText && gText->ready) {
+            // Nombre + tecla rapida dentro del chip ("ROJO  Z").
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s %s", SIMON_NAMES[i], SIMON_KEY_HINT[i]);
+            float scale = 0.32f;
+            float w = gText->MeasureWidth(buf, scale);
+            gText->RenderText(buf, cx + (chipW - w) * 0.5f, chipY + 7.0f,
+                              scale, glm::vec3(0.98f, 0.98f, 1.00f));
+        }
+    }
+
+    if (!gText || !gText->ready) {
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    // Linea 1: nivel, score, hits/misses, combo.
+    char line1[160];
+    int patLen = (int)gEnergia.pattern.size();
+    snprintf(line1, sizeof(line1),
+             "Nivel %d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d",
+             gEnergia.level, gEnergia.score, gEnergia.hits, gEnergia.misses,
+             gEnergia.combo, gEnergia.maxCombo);
+    float s1 = 0.36f;
+    float w1 = gText->MeasureWidth(line1, s1);
+    gText->RenderText(line1, panelX + (panelW - w1) * 0.5f, panelY + 56.0f,
+                      s1, glm::vec3(0.96f, 0.96f, 1.0f));
+
+    // Linea 2: estado / pista contextual segun fase.
+    char line2[200];
+    if (gEnergia.phase == 1) {
+        int shown = gEnergia.showIndex + 1;
+        if (shown < 0) shown = 0;
+        if (shown > patLen) shown = patLen;
+        snprintf(line2, sizeof(line2),
+                 "MEMORIZA  -  Mostrando patron (%d/%d)   |   TAB para salir",
+                 shown, patLen);
+    } else if (gEnergia.phase == 2) {
+        int next = gEnergia.playerIndex;
+        const char* nextName = (next >= 0 && next < patLen)
+            ? SIMON_NAMES[gEnergia.pattern[next]] : "-";
+        snprintf(line2, sizeof(line2),
+                 "TU TURNO  -  Paso %d/%d   Pulsa %s (clic o tecla)   |   TAB para salir",
+                 next + 1, patLen, nextName);
+    } else if (gEnergia.phase == 3) {
+        snprintf(line2, sizeof(line2),
+                 "FALLO  -  Reiniciando patron... (Mejor nivel %d)", gEnergia.bestLevel);
+    } else {
+        snprintf(line2, sizeof(line2),
+                 "Pulsa B para empezar  |  TAB para salir");
+    }
+    float s2 = 0.32f;
+    float w2 = gText->MeasureWidth(line2, s2);
+    glm::vec3 stateCol = (gEnergia.phase == 3)
+        ? glm::vec3(1.00f, 0.45f, 0.40f)
+        : (gEnergia.phase == 2 ? glm::vec3(0.55f, 1.00f, 0.65f)
+                                : glm::vec3(0.75f, 0.82f, 0.96f));
+    gText->RenderText(line2, panelX + (panelW - w2) * 0.5f, panelY + 30.0f,
+                      s2, stateCol);
+
+    // Footer corto centrado: contador "boton X de N" estilo OSU.
+    if (gEnergia.phase == 2 || gEnergia.phase == 1) {
+        char line3[80];
+        snprintf(line3, sizeof(line3), "Patron actual: %d luces", patLen);
+        float s3 = 0.30f;
+        float w3 = gText->MeasureWidth(line3, s3);
+        gText->RenderText(line3, panelX + (panelW - w3) * 0.5f, panelY + 8.0f,
+                          s3, glm::vec3(0.62f, 0.70f, 0.85f));
+    }
+
+    glEnable(GL_DEPTH_TEST);
+}
+
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!CUBO_MODELO) return;
+    if (!PLANO_MODELO && !CUBO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // Las pilas reales del modelo ya tienen botones; encima dibujamos un cubo
-    // de color para que el jugador identifique claramente los 4 botones del
-    // Simon y pueda hacer clic con el mouse. Cada cubo brilla con buttonGlow.
-    glm::vec4 simonColors[4] = {
-        glm::vec4(1.0f, 0.25f, 0.25f, 1.0f), // rojo
-        glm::vec4(0.25f, 1.0f, 0.30f, 1.0f), // verde
-        glm::vec4(0.30f, 0.55f, 1.0f, 1.0f), // azul
-        glm::vec4(1.0f, 0.95f, 0.25f, 1.0f)  // amarillo
-    };
-
+    // El modelo ENERGIA_OPACO ya trae los 12 botones fisicos de la pila
+    // R_1. Encima de los botones activos (4 en PRINCIPIANTE, 6 en MEDIO/
+    // EXPERTO) dibujamos una "membrana" plana de color (modelo plano.fbx)
+    // CON RESPALDO OSCURO detras para que el color resalte sobre la
+    // textura gris de la pila. El plano se orienta con normal +X y se
+    // separa SIMON_MEMBRANE_OFFSET m (negativo, hacia el jugador) para
+    // flotar claramente DELANTE del cubo del boton.
+    //
+    // buttonGlow[i] sube a 1.0 cuando el boton se enciende (mostrar
+    // patron) o cuando el jugador lo pulsa; decae 2.5/seg en Update.
+    // Mezclamos un pulso lento de "respiracion" para que las membranas
+    // sigan siendo visibles incluso cuando ningun boton esta activo.
     float t = (float)glfwGetTime();
-    // Botones del Simon como cubos limpios (sin tinte del FBX de CAJA).
-    Model* buttonModel = CUBO_MODELO;
-    for (int i = 0; i < 4; ++i) {
-        float glow = gEnergia.buttonGlow[i];
-        float pulse = 0.55f + 0.20f * sinf(t * 2.5f + i);
-        glm::vec4 c = simonColors[i] * (pulse + glow * 1.8f);
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.7f), 32);
 
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    Model* membrane = PLANO_MODELO ? PLANO_MODELO : CUBO_MODELO;
+    int nBtns = SimonActiveButtons();
+    for (int i = 0; i < nBtns; ++i) {
+        glm::vec3 pos = SimonButtonPos(i);
+        float glow = gEnergia.buttonGlow[i];
+        float pulse = 0.55f + 0.20f * sinf(t * 2.4f + i * 1.3f);
+        glm::vec4 base = SIMON_COLORS[i];
+
+        // (1) MARCO OSCURO: plano negro semitransparente un poco mas
+        //     grande que la membrana. Da contraste contra la textura
+        //     metalica gris de la pila, asi el color de la membrana
+        //     se lee de un vistazo aun a media distancia.
+        float marcoSize = 0.130f + glow * 0.020f;
+        if (membrane) {
+            glm::vec4 dark(0.02f, 0.02f, 0.04f, 0.85f);
+            SetMaterial(phongShader, dark, dark, glm::vec4(0.0f), 1);
+            phongShader->setFloat("transparency", dark.a);
+            glm::mat4 mm(1.0f);
+            mm = glm::translate(mm, pos + glm::vec3(SIMON_MEMBRANE_OFFSET * 0.55f, 0.0f, 0.0f));
+            mm = glm::rotate(mm, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            mm = glm::scale(mm, glm::vec3(marcoSize, 0.005f, marcoSize));
+            phongShader->setMat4("model", mm);
+            membrane->Draw(*phongShader);
+        }
+
+        // (2) MEMBRANA DE COLOR: plano grande y saturado, casi opaco en
+        //     reposo (alpha 0.85) y totalmente opaco al activarse. Asi
+        //     el jugador SIEMPRE ve las placas, no solo cuando suenan.
+        glm::vec4 diff = base * (0.95f + pulse * 0.25f + glow * 1.20f);
+        diff.a = glm::clamp(0.85f + glow * 0.15f, 0.0f, 1.0f);
+        glm::vec4 amb  = base * (0.55f + glow * 0.60f);
+        amb.a = diff.a;
+        glm::vec4 spec = glm::vec4(0.85f, 0.85f, 0.85f, 1.0f);
+        SetMaterial(phongShader, amb, diff, spec, 16);
+        phongShader->setFloat("transparency", diff.a);
+
+        float size = 0.110f + glow * 0.025f;
         glm::mat4 m(1.0f);
-        m = glm::translate(m, SIMON_BUTTON_POSITIONS[i]);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.55f + glow * 0.20f));
+        m = glm::translate(m, pos + glm::vec3(SIMON_MEMBRANE_OFFSET, 0.0f, 0.0f));
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        m = glm::scale(m, glm::vec3(size, 0.005f, size));
         phongShader->setMat4("model", m);
-        buttonModel->Draw(*phongShader);
+        membrane->Draw(*phongShader);
+
+        // (3) HALO frontal: cuando el boton esta activo, segundo plano
+        //     ligeramente delante con alpha pulsante para que parezca
+        //     "encendido / disparado". Solo cuando glow > 0.05 para no
+        //     gastar draws en reposo.
+        if (glow > 0.05f && membrane) {
+            glm::vec4 haloDiff = base * (1.4f + glow * 0.6f);
+            haloDiff.a = glm::clamp(glow * 0.55f, 0.0f, 0.75f);
+            SetMaterial(phongShader, haloDiff, haloDiff, glm::vec4(0.0f), 1);
+            phongShader->setFloat("transparency", haloDiff.a);
+
+            glm::mat4 hm(1.0f);
+            hm = glm::translate(hm, pos + glm::vec3(SIMON_MEMBRANE_OFFSET * 1.4f, 0.0f, 0.0f));
+            hm = glm::rotate(hm, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            float haloSize = size * (1.35f + 0.10f * pulse);
+            hm = glm::scale(hm, glm::vec3(haloSize, 0.005f, haloSize));
+            phongShader->setMat4("model", hm);
+            membrane->Draw(*phongShader);
+        }
     }
+
+    phongShader->setFloat("transparency", 1.0f);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 }
 
 // ============ RECICLAJE ============
@@ -3499,6 +4524,360 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+}
+
+// ============ HAMBURGUESA (CAPSULAS) ============
+// Minijuego de armado por capas que se juega sobre la mesa de la zona de
+// practicas (modulo CAPSULAS). Pulsando B se arranca; el jugador debe
+// agregar las capas de la hamburguesa en orden (PAN INFERIOR, CARNE,
+// QUESO, JITOMATE, LECHUGA, PAN SUPERIOR). El plato siempre esta sobre la
+// mesa. Cada acierto apila el modelo correspondiente; un error rompe el
+// combo y suma miss pero deja la torre intacta. En MEDIO/EXPERTO hay un
+// reloj contra el cual jugar; en FACIL no hay reloj.
+//
+// Resultado: al terminar las 6 capas se marca foodPrepared = true,
+// agua y comida saltan a 1.0 (igual que la version simple del cooking
+// timer), y la hamburguesa se queda visible sobre la mesa como prueba.
+
+void InitHamburguesaGame() {
+    gHamburguesa.step       = 0;
+    gHamburguesa.score      = 0;
+    gHamburguesa.hits       = 0;
+    gHamburguesa.misses     = 0;
+    gHamburguesa.combo      = 0;
+    gHamburguesa.maxCombo   = 0;
+    gHamburguesa.bestStep   = 0;
+    gHamburguesa.feedbackTimer = 0.0f;
+    gHamburguesa.lastWrong  = false;
+    gHamburguesa.lastWrongIng = -1;
+    gHamburguesa.finished   = false;
+    gHamburguesa.failedByTime = false;
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) gHamburguesa.layerAnim[i] = 0.0f;
+
+    // Reloj segun dificultad (0 = sin reloj). En FACIL es solo practicar
+    // la receta; en MEDIO/EXPERTO la dinamica se aprieta para que el
+    // armado se sienta como un servicio rapido.
+    switch (gHamburguesa.difficulty) {
+    case DIFF_EASY:   gHamburguesa.timeLimit = 0.0f;  break;
+    case DIFF_MEDIUM: gHamburguesa.timeLimit = 18.0f; break;
+    case DIFF_EXPERT: gHamburguesa.timeLimit = 10.0f; break;
+    default:          gHamburguesa.timeLimit = 0.0f;  break;
+    }
+    gHamburguesa.timeLeft = gHamburguesa.timeLimit;
+}
+
+void HamburguesaPress(int ingredient) {
+    if (!gHamburguesa.active) return;
+    if (gHamburguesa.finished) return;
+    if (ingredient < 0 || ingredient >= HAMB_ING_COUNT) return;
+
+    int expected = gHamburguesa.step;
+    if (ingredient == expected) {
+        // Acierto: apila la capa y avanza la receta.
+        gHamburguesa.layerAnim[ingredient] = 1.0f;
+        gHamburguesa.step++;
+        gHamburguesa.hits++;
+        gHamburguesa.combo++;
+        if (gHamburguesa.combo > gHamburguesa.maxCombo)
+            gHamburguesa.maxCombo = gHamburguesa.combo;
+        if (gHamburguesa.step > gHamburguesa.bestStep)
+            gHamburguesa.bestStep = gHamburguesa.step;
+        // Score base 100 + bonus de combo (la receta es solo 6 pasos asi
+        // que damos mas peso por acierto que en Simon, sin pasar de 200).
+        gHamburguesa.score += 100 + gHamburguesa.combo * 10;
+        gHamburguesa.lastWrong = false;
+        std::cout << "[Hamburguesa] OK " << HAMB_NAMES[ingredient]
+                  << "  (" << gHamburguesa.step << "/" << HAMB_ING_COUNT << ")"
+                  << "  combo=" << gHamburguesa.combo << std::endl;
+
+        if (gHamburguesa.step >= HAMB_ING_COUNT) {
+            // Hamburguesa terminada: palomea la tarea de comida y llena
+            // las barras de agua y comida (misma recompensa que tenia el
+            // cooking timer original).
+            gHamburguesa.finished = true;
+            if (!gStats.foodPrepared) {
+                gStats.foodPrepared = true;
+                gStats.agua   = 1.0f;
+                gStats.comida = 1.0f;
+            }
+            char buf[120];
+            snprintf(buf, sizeof(buf),
+                     "Hamburguesa lista! Score %d, racha %d. Agua y comida al 100%%.",
+                     gHamburguesa.score, gHamburguesa.maxCombo);
+            PushNarrative(buf);
+            std::cout << "[Hamburguesa] COMPLETA. Score=" << gHamburguesa.score
+                      << "  MaxCombo=" << gHamburguesa.maxCombo
+                      << "  Misses=" << gHamburguesa.misses << std::endl;
+        } else {
+            char buf[120];
+            snprintf(buf, sizeof(buf),
+                     "Bien! Siguiente capa: %s (tecla %s).",
+                     HAMB_NAMES[gHamburguesa.step],
+                     HAMB_KEY_HINT[gHamburguesa.step]);
+            PushNarrative(buf);
+        }
+    } else {
+        // Fallo: si la capa ya estaba colocada se llama "capa repetida".
+        gHamburguesa.misses++;
+        gHamburguesa.combo = 0;
+        gHamburguesa.lastWrong = true;
+        gHamburguesa.lastWrongIng = ingredient;
+        gHamburguesa.feedbackTimer = 0.6f;
+        const char* why = (ingredient < gHamburguesa.step)
+            ? "esa capa ya esta puesta"
+            : "todavia no toca esa capa";
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "Fallaste: %s, %s. Esperaba %s (tecla %s).",
+                 HAMB_NAMES[ingredient], why,
+                 HAMB_NAMES[expected], HAMB_KEY_HINT[expected]);
+        PushNarrative(buf);
+        std::cout << "[Hamburguesa] FALLO " << HAMB_NAMES[ingredient]
+                  << " (esperaba " << HAMB_NAMES[expected] << ")."
+                  << "  Misses=" << gHamburguesa.misses << std::endl;
+    }
+}
+
+void UpdateHamburguesaGame(float dt) {
+    if (!gHamburguesa.active) return;
+    // Animacion de apilado: cada capa cae suavemente al colocarse (la
+    // animacion va de 1.0 a 0.0 mientras "asienta" el ingrediente).
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+        if (gHamburguesa.layerAnim[i] > 0.0f) {
+            gHamburguesa.layerAnim[i] -= dt * 2.5f;
+            if (gHamburguesa.layerAnim[i] < 0.0f) gHamburguesa.layerAnim[i] = 0.0f;
+        }
+    }
+    if (gHamburguesa.feedbackTimer > 0.0f) {
+        gHamburguesa.feedbackTimer -= dt;
+        if (gHamburguesa.feedbackTimer <= 0.0f) {
+            gHamburguesa.feedbackTimer = 0.0f;
+            gHamburguesa.lastWrong = false;
+        }
+    }
+    // Reloj (solo MEDIO/EXPERTO). Si se agota antes de cerrar la receta,
+    // la partida se cuenta como fallida: NO marcamos foodPrepared y
+    // dejamos el progreso visible para que el jugador pueda reintentar.
+    if (!gHamburguesa.finished && gHamburguesa.timeLimit > 0.0f) {
+        gHamburguesa.timeLeft -= dt;
+        if (gHamburguesa.timeLeft <= 0.0f) {
+            gHamburguesa.timeLeft = 0.0f;
+            gHamburguesa.failedByTime = true;
+            gHamburguesa.finished = true;
+            PushNarrative("Se acabo el tiempo. Pulsa B para reintentar.");
+            std::cout << "[Hamburguesa] TIMEOUT. Capas colocadas="
+                      << gHamburguesa.step << std::endl;
+        }
+    }
+}
+
+void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!HAMB_PLATO && !HAMB_PAN_INFERIOR) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    // (1) Plato siempre visible cuando hay minijuego activo, partida
+    // pausada por TAB con progreso, o hamburguesa ya completada (queda
+    // como prueba sobre la mesa). Asi el jugador siempre ve donde va a
+    // armar el burger.
+    if (HAMB_PLATO) {
+        glm::vec3 platePos = HAMB_TABLE_TOP + glm::vec3(0.0f, HAMB_PLATE_LIFT, 0.0f);
+        SetMaterial(phongShader,
+                    glm::vec4(0.30f, 0.30f, 0.32f, 1.0f),
+                    glm::vec4(0.92f, 0.92f, 0.95f, 1.0f),
+                    glm::vec4(0.65f, 0.65f, 0.70f, 1.0f), 32);
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, platePos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(HAMB_MODEL_SCALE));
+        phongShader->setMat4("model", m);
+        HAMB_PLATO->Draw(*phongShader);
+    }
+
+    // (2) Capas apiladas. Se dibujan SOLO las que ya estan colocadas
+    // (i < step). La animacion layerAnim[i] anade un pequeno salto al
+    // momento de aterrizar (decay 2.5/seg en Update).
+    float yAccum = HAMB_PLATE_LIFT + 0.01f; // espacio entre plato y base
+    Model* layerModels[HAMB_ING_COUNT] = {
+        HAMB_PAN_INFERIOR, HAMB_CARNE, HAMB_QUESO, HAMB_JITOMATE,
+        HAMB_LECHUGA, HAMB_PAN_SUPERIOR
+    };
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+        if (i >= gHamburguesa.step) break;
+        if (!layerModels[i]) { yAccum += HAMB_LAYER_H[i]; continue; }
+
+        float drop = gHamburguesa.layerAnim[i] * 0.08f;
+        glm::vec3 pos = HAMB_TABLE_TOP + glm::vec3(0.0f, yAccum + drop, 0.0f);
+
+        glm::vec4 amb  = HAMB_CHIP_COLORS[i] * 0.35f; amb.a = 1.0f;
+        glm::vec4 diff = HAMB_CHIP_COLORS[i] * 0.95f; diff.a = 1.0f;
+        SetMaterial(phongShader, amb, diff,
+                    glm::vec4(0.55f, 0.55f, 0.55f, 1.0f), 16);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, pos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(HAMB_MODEL_SCALE));
+        phongShader->setMat4("model", m);
+        layerModels[i]->Draw(*phongShader);
+
+        yAccum += HAMB_LAYER_H[i];
+    }
+}
+
+// HUD del minijuego de hamburguesa. Mismo estilo (panel oscuro con borde
+// dorado + fila de chips de color + linea de estado) que Espectro y Simon
+// para que el modulo de comida se sienta parte del mismo set.
+void DrawHamburguesaHUD() {
+    if (!hudShader) return;
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 620.0f;
+    if (panelW > (float)SCR_WIDTH - 80.0f) panelW = (float)SCR_WIDTH - 80.0f;
+    float panelH = 138.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (float)SCR_HEIGHT - panelH - 26.0f;
+
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, panelH + 12.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(panelX - 6.0f, panelY + panelH + 3.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Fila de chips por ingrediente. Cada chip muestra el nombre y la
+    // tecla. El chip de la SIGUIENTE capa pulsa para guiar al jugador;
+    // los chips de capas YA colocadas se ven mas claros (cumplidos).
+    int n = HAMB_ING_COUNT;
+    float chipW = 90.0f;
+    float chipH = 30.0f;
+    float chipGap = 6.0f;
+    float chipsTotal = chipW * n + chipGap * (n - 1);
+    if (chipsTotal > panelW - 20.0f) {
+        chipW   = (panelW - 20.0f - chipGap * (n - 1)) / n;
+        chipsTotal = chipW * n + chipGap * (n - 1);
+    }
+    float chipX0 = panelX + (panelW - chipsTotal) * 0.5f;
+    float chipY  = panelY + panelH - chipH - 14.0f;
+    float tNow = (float)glfwGetTime();
+    for (int i = 0; i < n; ++i) {
+        glm::vec4 base = HAMB_CHIP_COLORS[i];
+        bool placed = (i < gHamburguesa.step);
+        bool isNext = (i == gHamburguesa.step) && !gHamburguesa.finished;
+        float pulse = 0.55f + 0.20f * sinf(tNow * 2.6f + i * 1.1f);
+
+        glm::vec4 bg = base;
+        if (placed) {
+            bg.r *= 0.85f; bg.g *= 0.85f; bg.b *= 0.85f; bg.a = 0.85f;
+        } else if (isNext) {
+            float k = 0.70f + 0.30f * pulse;
+            bg.r *= k; bg.g *= k; bg.b *= k;
+            bg.a = 0.95f;
+        } else {
+            bg.r *= 0.30f; bg.g *= 0.30f; bg.b *= 0.30f; bg.a = 0.55f;
+        }
+        float cx = chipX0 + i * (chipW + chipGap);
+        DrawQuad2D(cx, chipY, chipW, chipH, bg);
+        // Borde superior/inferior con color saturado en el chip activo.
+        float edge = isNext ? (0.55f + 0.45f * pulse) : (placed ? 0.45f : 0.18f);
+        DrawQuad2D(cx, chipY + chipH - 3.0f, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        DrawQuad2D(cx, chipY, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+
+        if (gText && gText->ready) {
+            char buf[40];
+            // Nombre + tecla compactos. En chips estrechos solo cabe la
+            // tecla y el primer caracter del nombre, asi que abreviamos.
+            const char* nm = HAMB_NAMES[i];
+            char shortNm[14];
+            // Tomar la primera palabra (hasta espacio) o primeras 8 letras.
+            int k = 0;
+            for (int c = 0; nm[c] && k < 12 && nm[c] != ' '; ++c) shortNm[k++] = nm[c];
+            shortNm[k] = '\0';
+            snprintf(buf, sizeof(buf), "%s %s", shortNm, HAMB_KEY_HINT[i]);
+            float scale = 0.28f;
+            float w = gText->MeasureWidth(buf, scale);
+            // Achicar si no entra
+            if (w > chipW - 6.0f) {
+                scale = 0.24f;
+                w = gText->MeasureWidth(buf, scale);
+            }
+            gText->RenderText(buf, cx + (chipW - w) * 0.5f, chipY + 8.0f,
+                              scale, glm::vec3(0.98f, 0.98f, 1.00f));
+        }
+    }
+
+    if (!gText || !gText->ready) {
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    // Linea 1: score / hits / misses / combo / progreso.
+    char line1[200];
+    if (gHamburguesa.timeLimit > 0.0f) {
+        snprintf(line1, sizeof(line1),
+                 "Capas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d  |  Tiempo %.1fs",
+                 gHamburguesa.step, HAMB_ING_COUNT,
+                 gHamburguesa.score, gHamburguesa.hits, gHamburguesa.misses,
+                 gHamburguesa.combo, gHamburguesa.maxCombo,
+                 gHamburguesa.timeLeft);
+    } else {
+        snprintf(line1, sizeof(line1),
+                 "Capas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d",
+                 gHamburguesa.step, HAMB_ING_COUNT,
+                 gHamburguesa.score, gHamburguesa.hits, gHamburguesa.misses,
+                 gHamburguesa.combo, gHamburguesa.maxCombo);
+    }
+    float s1 = 0.33f;
+    float w1 = gText->MeasureWidth(line1, s1);
+    if (w1 > panelW - 20.0f) { s1 = 0.28f; w1 = gText->MeasureWidth(line1, s1); }
+    gText->RenderText(line1, panelX + (panelW - w1) * 0.5f, panelY + 56.0f,
+                      s1, glm::vec3(0.96f, 0.96f, 1.0f));
+
+    // Linea 2: estado / receta.
+    char line2[200];
+    glm::vec3 stateCol = glm::vec3(0.75f, 0.82f, 0.96f);
+    if (gHamburguesa.finished && !gHamburguesa.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "HAMBURGUESA LISTA  -  Score final %d   |   TAB para cerrar",
+                 gHamburguesa.score);
+        stateCol = glm::vec3(0.55f, 1.00f, 0.65f);
+    } else if (gHamburguesa.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "Tiempo agotado en la capa %d/%d   |   Pulsa B para reintentar",
+                 gHamburguesa.step, HAMB_ING_COUNT);
+        stateCol = glm::vec3(1.00f, 0.45f, 0.40f);
+    } else if (gHamburguesa.lastWrong) {
+        snprintf(line2, sizeof(line2),
+                 "FALLO  -  Te toca la capa %s (tecla %s)",
+                 HAMB_NAMES[gHamburguesa.step], HAMB_KEY_HINT[gHamburguesa.step]);
+        stateCol = glm::vec3(1.00f, 0.55f, 0.45f);
+    } else {
+        snprintf(line2, sizeof(line2),
+                 "RECETA  -  Siguiente capa: %s (tecla %s)   |   TAB para salir",
+                 HAMB_NAMES[gHamburguesa.step], HAMB_KEY_HINT[gHamburguesa.step]);
+    }
+    float s2 = 0.32f;
+    float w2 = gText->MeasureWidth(line2, s2);
+    if (w2 > panelW - 20.0f) { s2 = 0.28f; w2 = gText->MeasureWidth(line2, s2); }
+    gText->RenderText(line2, panelX + (panelW - w2) * 0.5f, panelY + 30.0f,
+                      s2, stateCol);
+
+    // Footer: orden de la receta resumido.
+    char line3[160];
+    snprintf(line3, sizeof(line3),
+             "Receta: plato -> pan inf -> carne -> queso -> jitomate -> lechuga -> pan sup");
+    float s3 = 0.26f;
+    float w3 = gText->MeasureWidth(line3, s3);
+    if (w3 > panelW - 20.0f) { s3 = 0.22f; w3 = gText->MeasureWidth(line3, s3); }
+    gText->RenderText(line3, panelX + (panelW - w3) * 0.5f, panelY + 8.0f,
+                      s3, glm::vec3(0.62f, 0.70f, 0.85f));
+
+    glEnable(GL_DEPTH_TEST);
 }
 
 // ============ ESPECTROGRAFIA DEL METEORITO ============
@@ -3638,6 +5017,15 @@ static void EspectroStopBar() {
                  gEspectro.hits, gEspectro.rounds,
                  gEspectro.score, gEspectro.maxCombo);
         PushNarrative(buf);
+
+        // Marca el cometa como terminado si tuvo mas aciertos que fallos.
+        // Suma medio relleno a la barra de tareas (la otra mitad la pone
+        // reciclaje); cuando ambas tareas se cumplen la barra llega al 100%.
+        if (!gStats.cometDone && gEspectro.hits > gEspectro.misses) {
+            gStats.cometDone = true;
+            gStats.tareas    = gStats.recycleDone ? 1.0f : 0.60f;
+            PushNarrative("Cometa catalogado. Tarea cientifica registrada.");
+        }
     }
 }
 
