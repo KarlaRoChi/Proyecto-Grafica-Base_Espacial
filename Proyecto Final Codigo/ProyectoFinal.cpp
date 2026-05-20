@@ -679,10 +679,11 @@ const glm::vec3 HAMB_TABLE_TOP = glm::vec3(-14.5f, 0.73f, 0.0f);
 // z-fight con el mantel/plastico del modelo.
 const float    HAMB_PLATE_LIFT = 0.005f;
 // Escala uniforme aplicada a los modelos del burger. Los fbx vienen
-// dimensionados para encajar como hamburguesa real (~14 cm de ancho)
-// asi que basta con un escalado pequeno para que se vea sobre la
-// mesa sin ocupar toda la sala.
-const float    HAMB_MODEL_SCALE = 1.0f;
+// exportados a escala de Blender (1 unidad ~ 1 m), asi que el plato
+// con scale 1.0 ocupaba casi todo el cuarto. Lo reducimos a 0.15
+// para que la hamburguesa termine con ~15 cm de diametro sobre la
+// mesa, una hamburguesa creible y que deja ver TODAS las capas.
+const float    HAMB_MODEL_SCALE = 0.15f;
 
 // Lineas espectrales del minijuego del meteorito. La serie de Balmer del
 // hidrogeno tiene cuatro lineas en el visible; las usamos como objetivos del
@@ -1790,19 +1791,25 @@ bool Update() {
                 gLights[2].distance = 9.0f;
             }
 
-            // Botones Simon: brillo proporcional a buttonGlow + halo base
-            // suave para que siempre se vean encendidos cuando estes en la
-            // zona (el minijuego los pulsa cuando suenan en la secuencia o
-            // cuando el jugador los presiona). Numero de slots = activos.
+            // Botones Simon: cada uno tiene su propia LUZ TRASERA que
+            // vive embebida en el cubo de la tapa, de modo que el cubo
+            // siempre se ve auto-iluminado (luz propia) y al sonar en
+            // el patron se prende mucho mas fuerte. Numero de slots =
+            // activos. Distancia corta (1.2 m) para que solo bane al
+            // cubo y a un par de cm de la pila, sin teniir toda la sala.
             {
                 int nSimon = SimonActiveButtons();
+                // Cubo del simon se desplaza -0.035 m en X sobre el
+                // boton fisico, asi que la luz queda dentro del cubo.
+                glm::vec3 lightOffset(-0.035f, 0.0f, 0.0f);
                 for (int i = 0; i < nSimon && (size_t)(5 + i) < gLights.size(); ++i) {
                     float glow = gEnergia.buttonGlow[i];
-                    float ambient = 0.5f + 0.15f * sinf(t * 1.5f + i);
-                    float power = ambient + glow * 5.0f;
-                    gLights[5 + i].Position = SimonButtonPos(i);
+                    float ambient = 1.8f + 0.30f * sinf(t * 1.5f + i);
+                    float power = ambient + glow * 6.0f;
+                    gLights[5 + i].Position = SimonButtonPos(i) + lightOffset;
                     gLights[5 + i].Color = SIMON_COLORS[i];
                     gLights[5 + i].Power = glm::vec4(power);
+                    gLights[5 + i].distance = 1.2f;
                 }
             }
             break;
@@ -4429,16 +4436,16 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         SetMaterial(phongShader, amb, diff, spec, 32);
         phongShader->setFloat("transparency", 1.0f);
 
-        // Cubo de tapa: 0.22 m de arista (un poco menos que la
-        // separacion entre botones, 0.30 m, para que no invadan a sus
-        // vecinos). En reposo respira con el pulso; al iluminarse
-        // crece 1.5 cm para sentirse "pulsado".
-        float size = 0.22f + 0.010f * pulse + glow * 0.015f;
-        // Empujamos el cubo 0.09 m hacia el jugador (-X) para que la
-        // cara trasera del cubo quede pegada a la cara del boton fisico
-        // (cara visible en x = 5.076). Asi el cubo "se sienta" sobre el
-        // boton sin flotar ni hundirse demasiado dentro de la pila.
-        glm::vec3 capOffset(-0.09f, 0.0f, 0.0f);
+        // Cubo de tapa: 7 cm de arista para coincidir con el boton
+        // fisico real del modelo (6 cm de cara, segun botones.obj).
+        // En reposo respira sutilmente con el pulso; al iluminarse
+        // crece 5 mm para sentirse "pulsado".
+        float size = 0.070f + 0.004f * pulse + glow * 0.005f;
+        // Empujamos el cubo 3.5 cm hacia el jugador (-X) para que la
+        // cara trasera del cubo quede pegada a la cara visible del
+        // boton fisico (x = 5.076). Asi el cubo coincide en tamano y
+        // posicion con el boton real sin flotar ni hundirse en la pila.
+        glm::vec3 capOffset(-0.035f, 0.0f, 0.0f);
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, pos + capOffset);
@@ -4714,7 +4721,7 @@ void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view) {
     };
     for (int i = 0; i < HAMB_ING_COUNT; ++i) {
         if (i >= gHamburguesa.step) break;
-        if (!layerModels[i]) { yAccum += HAMB_LAYER_H[i]; continue; }
+        if (!layerModels[i]) { yAccum += (HAMB_LAYER_H[i] * HAMB_MODEL_SCALE); continue; }
 
         float drop = gHamburguesa.layerAnim[i] * 0.08f;
         glm::vec3 pos = HAMB_TABLE_TOP + glm::vec3(0.0f, yAccum + drop, 0.0f);
@@ -4731,7 +4738,7 @@ void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         layerModels[i]->Draw(*phongShader);
 
-        yAccum += HAMB_LAYER_H[i];
+        yAccum += (HAMB_LAYER_H[i] * HAMB_MODEL_SCALE);
     }
 }
 
