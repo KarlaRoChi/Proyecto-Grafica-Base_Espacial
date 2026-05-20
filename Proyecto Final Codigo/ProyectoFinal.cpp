@@ -759,23 +759,24 @@ const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 //   MEDIO + EXPERTO  (6): fila doble 2x3 cubriendo 3 columnas adyacentes
 // Con 6 botones la membrana cae sobre 3 columnas en lugar de 2, asi la
 // pila se ve mas "encendida" y el reto memoria-color sube de golpe.
-// Shift de 2 cm en Z negativo: la camara del Simon mira en +X con up
-// +Y, asi que la "izquierda en pantalla" corresponde a -Z mundial.
-// Asi los cubos quedan ligeramente desplazados hacia la izquierda del
-// frame del minijuego sin perder alineacion total con los botones.
+// Shift acumulado de 4 cm en Z negativo: la camara del Simon mira en
+// +X con up +Y, asi que la "izquierda en pantalla" corresponde a -Z
+// mundial. Los cubos quedan corridos a la izquierda del frame del
+// minijuego para que la pila de fondo respire un poco a la derecha
+// (sin perder alineacion con los botones fisicos reales).
 static const glm::vec3 SIMON_POS_4[4] = {
-    glm::vec3(5.076f, 1.50f, 12.88f),  // 0 ROJO     - top-right (R_1_20)
-    glm::vec3(5.076f, 1.50f, 12.58f),  // 1 VERDE    - top-left  (R_1_21)
-    glm::vec3(5.076f, 1.10f, 12.88f),  // 2 AZUL     - bot-right (R_1_10)
-    glm::vec3(5.076f, 1.10f, 12.58f)   // 3 AMARILLO - bot-left  (R_1_11)
+    glm::vec3(5.076f, 1.50f, 12.86f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.076f, 1.50f, 12.56f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.076f, 1.10f, 12.86f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.076f, 1.10f, 12.56f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
 static const glm::vec3 SIMON_POS_6[6] = {
-    glm::vec3(5.076f, 1.50f, 12.88f),  // 0 ROJO     - top-right
-    glm::vec3(5.076f, 1.50f, 12.58f),  // 1 VERDE    - top-mid
-    glm::vec3(5.076f, 1.50f, 12.28f),  // 2 AZUL     - top-left
-    glm::vec3(5.076f, 1.10f, 12.88f),  // 3 AMARILLO - bot-right
-    glm::vec3(5.076f, 1.10f, 12.58f),  // 4 NARANJA  - bot-mid
-    glm::vec3(5.076f, 1.10f, 12.28f)   // 5 MAGENTA  - bot-left
+    glm::vec3(5.076f, 1.50f, 12.86f),  // 0 ROJO     - top-right
+    glm::vec3(5.076f, 1.50f, 12.56f),  // 1 VERDE    - top-mid
+    glm::vec3(5.076f, 1.50f, 12.26f),  // 2 AZUL     - top-left
+    glm::vec3(5.076f, 1.10f, 12.86f),  // 3 AMARILLO - bot-right
+    glm::vec3(5.076f, 1.10f, 12.56f),  // 4 NARANJA  - bot-mid
+    glm::vec3(5.076f, 1.10f, 12.26f)   // 5 MAGENTA  - bot-left
 };
 
 // Separacion en X de la membrana respecto a la cara del boton. Negativo
@@ -1218,6 +1219,10 @@ void ChangeZone(int z) {
     gReciclaje.active = false;
     gEnergia.active = false;
     gEspectro.active = false;
+    // El minijuego de la hamburguesa tambien se cierra al cambiar de
+    // zona: antes el flag se quedaba activo y el HUD seguia visible
+    // sobre el HUB / otras salas aunque la partida estuviera lista.
+    gHamburguesa.active = false;
     gMinigameCamLocked = false;
 
     // Si el jugador venia con mensajes pendientes (intro o de la zona
@@ -1799,8 +1804,8 @@ bool Update() {
             // vive embebida en el cubo de la tapa, de modo que el cubo
             // siempre se ve auto-iluminado (luz propia) y al sonar en
             // el patron se prende mucho mas fuerte. Numero de slots =
-            // activos. Distancia corta (1.2 m) para que solo bane al
-            // cubo y a un par de cm de la pila, sin teniir toda la sala.
+            // activos. Distancia 1.5 m para que el cubo brille parejo
+            // sin teniir media sala.
             {
                 int nSimon = SimonActiveButtons();
                 // Cubo del simon se desplaza -0.035 m en X sobre el
@@ -1808,12 +1813,15 @@ bool Update() {
                 glm::vec3 lightOffset(-0.035f, 0.0f, 0.0f);
                 for (int i = 0; i < nSimon && (size_t)(5 + i) < gLights.size(); ++i) {
                     float glow = gEnergia.buttonGlow[i];
-                    float ambient = 1.8f + 0.30f * sinf(t * 1.5f + i);
-                    float power = ambient + glow * 6.0f;
+                    // Base muy alta (3.5) para que la membrana se vea
+                    // siempre encendida; al activarse en el patron se
+                    // empuja a ~12 para un destello bien notorio.
+                    float ambient = 3.5f + 0.40f * sinf(t * 1.5f + i);
+                    float power = ambient + glow * 8.5f;
                     gLights[5 + i].Position = SimonButtonPos(i) + lightOffset;
                     gLights[5 + i].Color = SIMON_COLORS[i];
                     gLights[5 + i].Power = glm::vec4(power);
-                    gLights[5 + i].distance = 1.2f;
+                    gLights[5 + i].distance = 1.5f;
                 }
             }
             break;
