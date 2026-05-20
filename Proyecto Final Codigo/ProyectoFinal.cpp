@@ -91,6 +91,15 @@ void EnergiaPress(int button);
 void InitReciclajeGame();
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
 
+// Hamburguesa (zona CAPSULAS): minijuego de armado por capas. El jugador
+// pulsa una tecla por capa siguiendo la receta y la torta se construye
+// visualmente sobre la mesa de la zona de practicas.
+void InitHamburguesaGame();
+void UpdateHamburguesaGame(float dt);
+void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawHamburguesaHUD();
+void HamburguesaPress(int ingredient);
+
 // SetCurrentZoneDifficulty se declara despues del enum Difficulty (mas abajo)
 
 // ============ TIPOS ============
@@ -323,11 +332,11 @@ struct PlayerStats {
 };
 PlayerStats gStats;
 
-// Estado de la mini-accion "preparar comida" en capsulas. Cuando arranca con
-// B muestra una barrita y al llenarse sube agua y comida.
-bool  gCookingActive = false;
-float gCookingTimer  = 0.0f;
-const float COOKING_DURATION = 3.0f;
+// Nota: la version anterior de la zona CAPSULAS solo tenia un timer de
+// cocinado de 3 s (gCookingActive / gCookingTimer / COOKING_DURATION).
+// Lo sustituimos por el minijuego de armado de hamburguesa por capas
+// (struct HamburguesaGame, mas abajo), asi que esas globales ya no son
+// necesarias.
 
 // ALT libera el mouse (lo descaptura) sin abrir ningun menu. Util para
 // mover la ventana, alt-tabear o hacer una captura de pantalla. Cuando esta
@@ -417,6 +426,17 @@ Model* BEBEDERO_AGUA = nullptr;
 // CAJA_MODELO para no romper el render (graceful fallback).
 Model* CUBO_MODELO = nullptr;
 Model* PLANO_MODELO = nullptr;
+
+// Ingredientes de la hamburguesa (zona CAPSULAS). Cada uno es un fbx
+// independiente que se apila visualmente sobre la mesa de practicas cuando
+// el jugador acierta la tecla correspondiente en el minijuego.
+Model* HAMB_PLATO        = nullptr;
+Model* HAMB_PAN_INFERIOR = nullptr;
+Model* HAMB_CARNE        = nullptr;
+Model* HAMB_QUESO        = nullptr;
+Model* HAMB_JITOMATE     = nullptr;
+Model* HAMB_LECHUGA      = nullptr;
+Model* HAMB_PAN_SUPERIOR = nullptr;
 
 CubeMap* mainCubeMap = nullptr;
 std::vector<Light> gLights;
@@ -570,6 +590,96 @@ InvernaderoGame gInvernadero;
 SimonGame gEnergia;
 ReciclajeGame gReciclaje;
 EspectroGame gEspectro;
+
+// --- Hamburguesa (Zona CAPSULAS, mesa de practicas) ---
+// Minijuego de armado por capas: la receta marca el orden bottom-up
+// (PAN INFERIOR -> CARNE -> QUESO -> JITOMATE -> LECHUGA -> PAN SUPERIOR),
+// el plato esta siempre sobre la mesa. Cada acierto apila el ingrediente
+// real (modelo fbx) y suma score; un error rompe el combo pero deja la
+// torre intacta. Al colocar la ultima capa la tarea "preparar comida"
+// se da por completa y se llenan las barras de agua/comida.
+enum HamburgIng {
+    HAMB_ING_PAN_INFERIOR = 0,
+    HAMB_ING_CARNE        = 1,
+    HAMB_ING_QUESO        = 2,
+    HAMB_ING_JITOMATE     = 3,
+    HAMB_ING_LECHUGA      = 4,
+    HAMB_ING_PAN_SUPERIOR = 5,
+    HAMB_ING_COUNT        = 6
+};
+
+struct HamburguesaGame {
+    Difficulty difficulty = DIFF_EASY;
+    bool active           = false;
+    int  step             = 0;       // 0..HAMB_ING_COUNT (cuando llega a 6 termino)
+    int  score            = 0;
+    int  hits             = 0;
+    int  misses           = 0;
+    int  combo            = 0;
+    int  maxCombo         = 0;
+    int  bestStep         = 0;       // mejor numero de capas en la partida actual
+    float layerAnim[HAMB_ING_COUNT] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f }; // 0..1 al apilar
+    float feedbackTimer   = 0.0f;    // tiempo de flash rojo tras error
+    bool  lastWrong       = false;   // ultimo intento fallido
+    int   lastWrongIng    = -1;
+    float timeLimit       = 0.0f;    // segundos (0 = sin reloj)
+    float timeLeft        = 0.0f;    // cuenta regresiva en MEDIO/EXPERTO
+    bool  finished        = false;   // todas las capas colocadas
+    bool  failedByTime    = false;
+};
+
+HamburguesaGame gHamburguesa;
+
+// Datos por ingrediente del burger. ALTURA local de cada capa (en
+// unidades de mundo) y la TECLA asociada. La altura se suma en
+// cascada para apilar las capas sobre el plato. Las teclas se eligen
+// fuera del rango de zonas (0..4) y dificultad (7,8,9), y procurando
+// no chocar con los demas minijuegos de otras zonas.
+const char* HAMB_NAMES[HAMB_ING_COUNT] = {
+    "PAN INFERIOR", "CARNE", "QUESO", "JITOMATE", "LECHUGA", "PAN SUPERIOR"
+};
+const char* HAMB_KEY_HINT[HAMB_ING_COUNT] = {
+    "5", "6", "U", "I", "O", "P"
+};
+const int HAMB_KEYS[HAMB_ING_COUNT] = {
+    GLFW_KEY_5, GLFW_KEY_6, GLFW_KEY_U, GLFW_KEY_I, GLFW_KEY_O, GLFW_KEY_P
+};
+// Altura visual aproximada por capa (mundo). Cada capa se apila sumando
+// esta cantidad sobre la anterior. Valores conservadores para que las
+// capas no se traslapen ni floten demasiado lejos entre si.
+const float HAMB_LAYER_H[HAMB_ING_COUNT] = {
+    0.08f,  // pan inferior
+    0.06f,  // carne
+    0.025f, // queso
+    0.04f,  // jitomate
+    0.05f,  // lechuga
+    0.10f   // pan superior
+};
+// Color del chip / icono en el HUD por ingrediente (estilo Simon).
+const glm::vec4 HAMB_CHIP_COLORS[HAMB_ING_COUNT] = {
+    glm::vec4(0.88f, 0.68f, 0.32f, 1.0f), // pan inferior - dorado
+    glm::vec4(0.62f, 0.26f, 0.18f, 1.0f), // carne - cafe rojizo
+    glm::vec4(0.98f, 0.82f, 0.20f, 1.0f), // queso - amarillo
+    glm::vec4(0.92f, 0.22f, 0.20f, 1.0f), // jitomate - rojo
+    glm::vec4(0.32f, 0.78f, 0.30f, 1.0f), // lechuga - verde
+    glm::vec4(0.94f, 0.78f, 0.40f, 1.0f)  // pan superior - dorado claro
+};
+
+// Posicion mundial del centro de la mesa de practicas (zona CAPSULAS).
+// El modelo CAPSULAS_OPACO.fbx exporta la mesa con la tapa sobre el eje
+// y entre [0.67,0.73]. Con baseModelMat (rot -90 X de Blender Z-up a
+// Y-up) eso queda como un cubo en world space con tapa a y=0.73 y
+// centrado en (x=-14.5, z=0.0). Apilamos el plato + capas sobre ese
+// punto.
+const glm::vec3 HAMB_TABLE_TOP = glm::vec3(-14.5f, 0.73f, 0.0f);
+// Cuanto sube el plato por encima de la tapa de la mesa para evitar
+// z-fight con el mantel/plastico del modelo.
+const float    HAMB_PLATE_LIFT = 0.005f;
+// Escala uniforme aplicada a los modelos del burger. Los fbx vienen
+// dimensionados para encajar como hamburguesa real (~14 cm de ancho)
+// asi que basta con un escalado pequeno para que se vea sobre la
+// mesa sin ocupar toda la sala.
+const float    HAMB_MODEL_SCALE = 1.0f;
 
 // Lineas espectrales del minijuego del meteorito. La serie de Balmer del
 // hidrogeno tiene cuatro lineas en el visible; las usamos como objetivos del
@@ -1257,6 +1367,15 @@ bool Start() {
     CUBO_MODELO   = CargarModelo("models/cubo.fbx");
     PLANO_MODELO  = CargarModelo("models/plano.fbx");
 
+    // Ingredientes del minijuego de hamburguesa (zona CAPSULAS).
+    HAMB_PLATO        = CargarModelo("models/hamburguesa_plato.fbx");
+    HAMB_PAN_INFERIOR = CargarModelo("models/hamburguesa_paninferior.fbx");
+    HAMB_CARNE        = CargarModelo("models/hamburguesa_carne.fbx");
+    HAMB_QUESO        = CargarModelo("models/hamburguesa_queso.fbx");
+    HAMB_JITOMATE     = CargarModelo("models/hamburguesa_jitomate.fbx");
+    HAMB_LECHUGA      = CargarModelo("models/hamburguesa_lechuga.fbx");
+    HAMB_PAN_SUPERIOR = CargarModelo("models/hamburguesa_pansuperior.fbx");
+
     GenerarColisionesDeModelo(HUB_OPACO, 0, baseModelMat);
     GenerarColisionesDeModelo(INVERNADERO_OPACO, 1, baseModelMat);
     GenerarColisionesDeModelo(RECICLAJE_OPACO, 2, baseModelMat);
@@ -1612,6 +1731,7 @@ bool Update() {
         if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
         if (currentZone == 1 && gEspectro.active)    UpdateEspectroGame(deltaTime);
         if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
+        if (currentZone == 4 && gHamburguesa.active) UpdateHamburguesaGame(deltaTime);
     }
 
     // Resetear luces extras por defecto
@@ -2056,6 +2176,13 @@ bool Update() {
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
         if (CAPSULAS_OPACO) CAPSULAS_OPACO->Draw(*phongShader);
 
+        // ====== MINIJUEGO HAMBURGUESA (mesa de practicas) ======
+        // Dibujamos la pila si el minijuego esta activo O si la comida ya
+        // quedo preparada (la hamburguesa terminada se queda visible como
+        // prueba de la tarea cumplida).
+        if (gHamburguesa.active || gStats.foodPrepared || gHamburguesa.step > 0)
+            DrawHamburguesaGame(projection, view);
+
         // Puerta de retorno al HUB (zoneDoors[7], borde este del modulo)
         DrawZoneDoor(7, zoneDoors[7], RETURN_DOOR_YAW[3]);
         SetMaterial(phongShader, ambOpaque, diffOpaque, specOpaque, alphaOpaque);
@@ -2231,6 +2358,7 @@ void DrawControlsOverlay() {
         { "Manual del Astronauta",    "Q" },
         { "Liberar / recapturar mouse","ALT" },
         { "Preparar comida (capsulas)",  "B" },
+        { "Capas hamburguesa (capsulas)", "5 6 U I O P" },
         { "Salir / interrumpir minijuego", "TAB" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
@@ -2530,7 +2658,10 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY)   out.push_back("Llega a Nivel 3 para estabilizar el reactor (Energia al 100%)");
         break;
     case 4: // CAPSULAS
-        if (d <= DIFF_EASY) out.push_back("Zona de descanso: pasea libremente y vuelve por la puerta luminosa");
+        out.push_back("B = arma la hamburguesa en la mesa de practicas  |  5 6 U I O P apilan las capas en orden");
+        if (d <= DIFF_EASY) out.push_back("Receta: pan inferior -> carne -> queso -> jitomate -> lechuga -> pan superior");
+        if (d <= DIFF_EASY) out.push_back("FACIL no tiene reloj; MEDIO/EXPERTO te ponen tiempo para servir la torta");
+        if (d <= DIFF_EASY) out.push_back("Requiere haber regado las plantas del invernadero (cultivos frescos)");
         break;
     }
 
@@ -2553,7 +2684,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
         case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
         case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
-        case 4: zoneHint = "CAPSULAS: B prepara comida (necesita plantas regadas)";            break;
+        case 4: zoneHint = "CAPSULAS: B inicia armar la hamburguesa  |  5 6 U I O P apilan las capas";  break;
     }
     out.push_back(zoneHint);
     out.push_back("Q manual de tareas  |  H expandir ayuda  |  ALT libera mouse");
@@ -2829,7 +2960,7 @@ void DrawQuestsWidget() {
         { "Catalogar cometa",    gStats.cometDone     },
         { "Visitar almacen",     gStats.recycleDone   },
         { "Estabilizar reactor", gStats.simonDone     },
-        { "Preparar comida",     gStats.foodPrepared  },
+        { "Armar hamburguesa",   gStats.foodPrepared  },
     };
     int doneCount = 0;
     int firstPending = -1;
@@ -2970,7 +3101,7 @@ void DrawQuestsMenu() {
         { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
         { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
         { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
-        { "Preparar comida (Capsulas)",              "Requiere plantas regadas",       gStats.foodPrepared },
+        { "Armar la hamburguesa (Capsulas)",         "B + receta 5 6 U I O P en orden", gStats.foodPrepared },
     };
 
     float yTop = panelY + panelH - 140.0f;
@@ -3034,6 +3165,7 @@ void DrawHud() {
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
     if (gEnergia.active)  DrawEnergiaHUD();
+    if (gHamburguesa.active) DrawHamburguesaHUD();
 }
 
 // ============ INPUT & CONTROLES ============
@@ -3484,33 +3616,51 @@ void processInput(GLFWwindow* window) {
         }
     }
 
-    // ZONA 4: CAPSULAS - mini-accion "preparar comida".
-    // B inicia una cuenta regresiva COOKING_DURATION; al terminar llena las
-    // barras de agua y comida y palomea la tarea. Requiere que las plantas
-    // ya esten regadas (gStats.plantsWatered == true), si no muestra aviso.
+    // ZONA 4: CAPSULAS - Minijuego "Armar Hamburguesa".
+    // B inicia la preparacion en la mesa de practicas. La camara se queda
+    // libre para que el jugador siga viendo la mesa mientras teclea las
+    // capas en orden (PAN INFERIOR -> CARNE -> QUESO -> JITOMATE ->
+    // LECHUGA -> PAN SUPERIOR). Al colocar la ultima capa se llenan las
+    // barras de agua y comida igual que con la version vieja del cooking
+    // timer. Requiere que las plantas ya esten regadas para mantener la
+    // misma narrativa del proyecto (cultivos frescos como insumo).
     if (currentZone == 4) {
         static bool keyBCapLast = false;
         bool bCap = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
-        if (bCap && !keyBCapLast && !gCookingActive && !gStats.foodPrepared) {
+        if (bCap && !keyBCapLast && !gHamburguesa.active && !gStats.foodPrepared) {
             if (!gStats.plantsWatered) {
                 PushNarrative("Necesitas regar las plantas del invernadero primero.");
             } else {
-                gCookingActive = true;
-                gCookingTimer  = 0.0f;
-                PushNarrative("Preparando comida con cultivos frescos...");
+                InitHamburguesaGame();
+                gHamburguesa.active = true;
+                PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta.");
+                std::cout << "[Hamburguesa] Nueva partida (dificultad "
+                          << gHamburguesa.difficulty << ")" << std::endl;
             }
         }
         keyBCapLast = bCap;
 
-        if (gCookingActive) {
-            gCookingTimer += deltaTime;
-            if (gCookingTimer >= COOKING_DURATION) {
-                gCookingActive    = false;
-                gStats.foodPrepared = true;
-                gStats.agua       = 1.0f;
-                gStats.comida     = 1.0f;
-                PushNarrative("Comida lista. Agua y comida al 100%.");
+        if (gHamburguesa.active) {
+            // Teclas de ingrediente. Cada tecla apila la capa correspondiente
+            // SOLO si es la que toca. Si es otra capa o ya esta colocada,
+            // cuenta como miss y rompe el combo.
+            static bool keyLast[HAMB_ING_COUNT] = { false, false, false, false, false, false };
+            for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+                bool now = glfwGetKey(window, HAMB_KEYS[i]) == GLFW_PRESS;
+                if (now && !keyLast[i]) HamburguesaPress(i);
+                keyLast[i] = now;
             }
+
+            // TAB interrumpe el minijuego y deja el progreso parcial visible
+            // sobre la mesa (las capas ya colocadas no se borran, asi el
+            // jugador puede continuar despues con B).
+            static bool tabIntH = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntH) {
+                gHamburguesa.active = false;
+                PushNarrative("Minijuego de hamburguesa interrumpido.");
+            }
+            tabIntH = tabInt;
         }
     }
 }
@@ -3581,6 +3731,7 @@ void SetCurrentZoneDifficulty(Difficulty d) {
         break;
     case 2: gReciclaje.difficulty   = d; break;
     case 3: gEnergia.difficulty     = d; break;
+    case 4: gHamburguesa.difficulty = d; break;
     default: return;
     }
     std::cout << "[Zona " << currentZone << "] Dificultad: " << difLbl[(int)d] << std::endl;
@@ -4316,6 +4467,360 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+}
+
+// ============ HAMBURGUESA (CAPSULAS) ============
+// Minijuego de armado por capas que se juega sobre la mesa de la zona de
+// practicas (modulo CAPSULAS). Pulsando B se arranca; el jugador debe
+// agregar las capas de la hamburguesa en orden (PAN INFERIOR, CARNE,
+// QUESO, JITOMATE, LECHUGA, PAN SUPERIOR). El plato siempre esta sobre la
+// mesa. Cada acierto apila el modelo correspondiente; un error rompe el
+// combo y suma miss pero deja la torre intacta. En MEDIO/EXPERTO hay un
+// reloj contra el cual jugar; en FACIL no hay reloj.
+//
+// Resultado: al terminar las 6 capas se marca foodPrepared = true,
+// agua y comida saltan a 1.0 (igual que la version simple del cooking
+// timer), y la hamburguesa se queda visible sobre la mesa como prueba.
+
+void InitHamburguesaGame() {
+    gHamburguesa.step       = 0;
+    gHamburguesa.score      = 0;
+    gHamburguesa.hits       = 0;
+    gHamburguesa.misses     = 0;
+    gHamburguesa.combo      = 0;
+    gHamburguesa.maxCombo   = 0;
+    gHamburguesa.bestStep   = 0;
+    gHamburguesa.feedbackTimer = 0.0f;
+    gHamburguesa.lastWrong  = false;
+    gHamburguesa.lastWrongIng = -1;
+    gHamburguesa.finished   = false;
+    gHamburguesa.failedByTime = false;
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) gHamburguesa.layerAnim[i] = 0.0f;
+
+    // Reloj segun dificultad (0 = sin reloj). En FACIL es solo practicar
+    // la receta; en MEDIO/EXPERTO la dinamica se aprieta para que el
+    // armado se sienta como un servicio rapido.
+    switch (gHamburguesa.difficulty) {
+    case DIFF_EASY:   gHamburguesa.timeLimit = 0.0f;  break;
+    case DIFF_MEDIUM: gHamburguesa.timeLimit = 18.0f; break;
+    case DIFF_EXPERT: gHamburguesa.timeLimit = 10.0f; break;
+    default:          gHamburguesa.timeLimit = 0.0f;  break;
+    }
+    gHamburguesa.timeLeft = gHamburguesa.timeLimit;
+}
+
+void HamburguesaPress(int ingredient) {
+    if (!gHamburguesa.active) return;
+    if (gHamburguesa.finished) return;
+    if (ingredient < 0 || ingredient >= HAMB_ING_COUNT) return;
+
+    int expected = gHamburguesa.step;
+    if (ingredient == expected) {
+        // Acierto: apila la capa y avanza la receta.
+        gHamburguesa.layerAnim[ingredient] = 1.0f;
+        gHamburguesa.step++;
+        gHamburguesa.hits++;
+        gHamburguesa.combo++;
+        if (gHamburguesa.combo > gHamburguesa.maxCombo)
+            gHamburguesa.maxCombo = gHamburguesa.combo;
+        if (gHamburguesa.step > gHamburguesa.bestStep)
+            gHamburguesa.bestStep = gHamburguesa.step;
+        // Score base 100 + bonus de combo (la receta es solo 6 pasos asi
+        // que damos mas peso por acierto que en Simon, sin pasar de 200).
+        gHamburguesa.score += 100 + gHamburguesa.combo * 10;
+        gHamburguesa.lastWrong = false;
+        std::cout << "[Hamburguesa] OK " << HAMB_NAMES[ingredient]
+                  << "  (" << gHamburguesa.step << "/" << HAMB_ING_COUNT << ")"
+                  << "  combo=" << gHamburguesa.combo << std::endl;
+
+        if (gHamburguesa.step >= HAMB_ING_COUNT) {
+            // Hamburguesa terminada: palomea la tarea de comida y llena
+            // las barras de agua y comida (misma recompensa que tenia el
+            // cooking timer original).
+            gHamburguesa.finished = true;
+            if (!gStats.foodPrepared) {
+                gStats.foodPrepared = true;
+                gStats.agua   = 1.0f;
+                gStats.comida = 1.0f;
+            }
+            char buf[120];
+            snprintf(buf, sizeof(buf),
+                     "Hamburguesa lista! Score %d, racha %d. Agua y comida al 100%%.",
+                     gHamburguesa.score, gHamburguesa.maxCombo);
+            PushNarrative(buf);
+            std::cout << "[Hamburguesa] COMPLETA. Score=" << gHamburguesa.score
+                      << "  MaxCombo=" << gHamburguesa.maxCombo
+                      << "  Misses=" << gHamburguesa.misses << std::endl;
+        } else {
+            char buf[120];
+            snprintf(buf, sizeof(buf),
+                     "Bien! Siguiente capa: %s (tecla %s).",
+                     HAMB_NAMES[gHamburguesa.step],
+                     HAMB_KEY_HINT[gHamburguesa.step]);
+            PushNarrative(buf);
+        }
+    } else {
+        // Fallo: si la capa ya estaba colocada se llama "capa repetida".
+        gHamburguesa.misses++;
+        gHamburguesa.combo = 0;
+        gHamburguesa.lastWrong = true;
+        gHamburguesa.lastWrongIng = ingredient;
+        gHamburguesa.feedbackTimer = 0.6f;
+        const char* why = (ingredient < gHamburguesa.step)
+            ? "esa capa ya esta puesta"
+            : "todavia no toca esa capa";
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "Fallaste: %s, %s. Esperaba %s (tecla %s).",
+                 HAMB_NAMES[ingredient], why,
+                 HAMB_NAMES[expected], HAMB_KEY_HINT[expected]);
+        PushNarrative(buf);
+        std::cout << "[Hamburguesa] FALLO " << HAMB_NAMES[ingredient]
+                  << " (esperaba " << HAMB_NAMES[expected] << ")."
+                  << "  Misses=" << gHamburguesa.misses << std::endl;
+    }
+}
+
+void UpdateHamburguesaGame(float dt) {
+    if (!gHamburguesa.active) return;
+    // Animacion de apilado: cada capa cae suavemente al colocarse (la
+    // animacion va de 1.0 a 0.0 mientras "asienta" el ingrediente).
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+        if (gHamburguesa.layerAnim[i] > 0.0f) {
+            gHamburguesa.layerAnim[i] -= dt * 2.5f;
+            if (gHamburguesa.layerAnim[i] < 0.0f) gHamburguesa.layerAnim[i] = 0.0f;
+        }
+    }
+    if (gHamburguesa.feedbackTimer > 0.0f) {
+        gHamburguesa.feedbackTimer -= dt;
+        if (gHamburguesa.feedbackTimer <= 0.0f) {
+            gHamburguesa.feedbackTimer = 0.0f;
+            gHamburguesa.lastWrong = false;
+        }
+    }
+    // Reloj (solo MEDIO/EXPERTO). Si se agota antes de cerrar la receta,
+    // la partida se cuenta como fallida: NO marcamos foodPrepared y
+    // dejamos el progreso visible para que el jugador pueda reintentar.
+    if (!gHamburguesa.finished && gHamburguesa.timeLimit > 0.0f) {
+        gHamburguesa.timeLeft -= dt;
+        if (gHamburguesa.timeLeft <= 0.0f) {
+            gHamburguesa.timeLeft = 0.0f;
+            gHamburguesa.failedByTime = true;
+            gHamburguesa.finished = true;
+            PushNarrative("Se acabo el tiempo. Pulsa B para reintentar.");
+            std::cout << "[Hamburguesa] TIMEOUT. Capas colocadas="
+                      << gHamburguesa.step << std::endl;
+        }
+    }
+}
+
+void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view) {
+    if (!HAMB_PLATO && !HAMB_PAN_INFERIOR) return;
+    phongShader->use();
+    phongShader->setMat4("projection", projection);
+    phongShader->setMat4("view", view);
+
+    // (1) Plato siempre visible cuando hay minijuego activo, partida
+    // pausada por TAB con progreso, o hamburguesa ya completada (queda
+    // como prueba sobre la mesa). Asi el jugador siempre ve donde va a
+    // armar el burger.
+    if (HAMB_PLATO) {
+        glm::vec3 platePos = HAMB_TABLE_TOP + glm::vec3(0.0f, HAMB_PLATE_LIFT, 0.0f);
+        SetMaterial(phongShader,
+                    glm::vec4(0.30f, 0.30f, 0.32f, 1.0f),
+                    glm::vec4(0.92f, 0.92f, 0.95f, 1.0f),
+                    glm::vec4(0.65f, 0.65f, 0.70f, 1.0f), 32);
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, platePos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(HAMB_MODEL_SCALE));
+        phongShader->setMat4("model", m);
+        HAMB_PLATO->Draw(*phongShader);
+    }
+
+    // (2) Capas apiladas. Se dibujan SOLO las que ya estan colocadas
+    // (i < step). La animacion layerAnim[i] anade un pequeno salto al
+    // momento de aterrizar (decay 2.5/seg en Update).
+    float yAccum = HAMB_PLATE_LIFT + 0.01f; // espacio entre plato y base
+    Model* layerModels[HAMB_ING_COUNT] = {
+        HAMB_PAN_INFERIOR, HAMB_CARNE, HAMB_QUESO, HAMB_JITOMATE,
+        HAMB_LECHUGA, HAMB_PAN_SUPERIOR
+    };
+    for (int i = 0; i < HAMB_ING_COUNT; ++i) {
+        if (i >= gHamburguesa.step) break;
+        if (!layerModels[i]) { yAccum += HAMB_LAYER_H[i]; continue; }
+
+        float drop = gHamburguesa.layerAnim[i] * 0.08f;
+        glm::vec3 pos = HAMB_TABLE_TOP + glm::vec3(0.0f, yAccum + drop, 0.0f);
+
+        glm::vec4 amb  = HAMB_CHIP_COLORS[i] * 0.35f; amb.a = 1.0f;
+        glm::vec4 diff = HAMB_CHIP_COLORS[i] * 0.95f; diff.a = 1.0f;
+        SetMaterial(phongShader, amb, diff,
+                    glm::vec4(0.55f, 0.55f, 0.55f, 1.0f), 16);
+
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, pos);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(HAMB_MODEL_SCALE));
+        phongShader->setMat4("model", m);
+        layerModels[i]->Draw(*phongShader);
+
+        yAccum += HAMB_LAYER_H[i];
+    }
+}
+
+// HUD del minijuego de hamburguesa. Mismo estilo (panel oscuro con borde
+// dorado + fila de chips de color + linea de estado) que Espectro y Simon
+// para que el modulo de comida se sienta parte del mismo set.
+void DrawHamburguesaHUD() {
+    if (!hudShader) return;
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 620.0f;
+    if (panelW > (float)SCR_WIDTH - 80.0f) panelW = (float)SCR_WIDTH - 80.0f;
+    float panelH = 138.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (float)SCR_HEIGHT - panelH - 26.0f;
+
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, panelH + 12.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(panelX - 6.0f, panelY + panelH + 3.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Fila de chips por ingrediente. Cada chip muestra el nombre y la
+    // tecla. El chip de la SIGUIENTE capa pulsa para guiar al jugador;
+    // los chips de capas YA colocadas se ven mas claros (cumplidos).
+    int n = HAMB_ING_COUNT;
+    float chipW = 90.0f;
+    float chipH = 30.0f;
+    float chipGap = 6.0f;
+    float chipsTotal = chipW * n + chipGap * (n - 1);
+    if (chipsTotal > panelW - 20.0f) {
+        chipW   = (panelW - 20.0f - chipGap * (n - 1)) / n;
+        chipsTotal = chipW * n + chipGap * (n - 1);
+    }
+    float chipX0 = panelX + (panelW - chipsTotal) * 0.5f;
+    float chipY  = panelY + panelH - chipH - 14.0f;
+    float tNow = (float)glfwGetTime();
+    for (int i = 0; i < n; ++i) {
+        glm::vec4 base = HAMB_CHIP_COLORS[i];
+        bool placed = (i < gHamburguesa.step);
+        bool isNext = (i == gHamburguesa.step) && !gHamburguesa.finished;
+        float pulse = 0.55f + 0.20f * sinf(tNow * 2.6f + i * 1.1f);
+
+        glm::vec4 bg = base;
+        if (placed) {
+            bg.r *= 0.85f; bg.g *= 0.85f; bg.b *= 0.85f; bg.a = 0.85f;
+        } else if (isNext) {
+            float k = 0.70f + 0.30f * pulse;
+            bg.r *= k; bg.g *= k; bg.b *= k;
+            bg.a = 0.95f;
+        } else {
+            bg.r *= 0.30f; bg.g *= 0.30f; bg.b *= 0.30f; bg.a = 0.55f;
+        }
+        float cx = chipX0 + i * (chipW + chipGap);
+        DrawQuad2D(cx, chipY, chipW, chipH, bg);
+        // Borde superior/inferior con color saturado en el chip activo.
+        float edge = isNext ? (0.55f + 0.45f * pulse) : (placed ? 0.45f : 0.18f);
+        DrawQuad2D(cx, chipY + chipH - 3.0f, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        DrawQuad2D(cx, chipY, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+
+        if (gText && gText->ready) {
+            char buf[40];
+            // Nombre + tecla compactos. En chips estrechos solo cabe la
+            // tecla y el primer caracter del nombre, asi que abreviamos.
+            const char* nm = HAMB_NAMES[i];
+            char shortNm[14];
+            // Tomar la primera palabra (hasta espacio) o primeras 8 letras.
+            int k = 0;
+            for (int c = 0; nm[c] && k < 12 && nm[c] != ' '; ++c) shortNm[k++] = nm[c];
+            shortNm[k] = '\0';
+            snprintf(buf, sizeof(buf), "%s %s", shortNm, HAMB_KEY_HINT[i]);
+            float scale = 0.28f;
+            float w = gText->MeasureWidth(buf, scale);
+            // Achicar si no entra
+            if (w > chipW - 6.0f) {
+                scale = 0.24f;
+                w = gText->MeasureWidth(buf, scale);
+            }
+            gText->RenderText(buf, cx + (chipW - w) * 0.5f, chipY + 8.0f,
+                              scale, glm::vec3(0.98f, 0.98f, 1.00f));
+        }
+    }
+
+    if (!gText || !gText->ready) {
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    // Linea 1: score / hits / misses / combo / progreso.
+    char line1[200];
+    if (gHamburguesa.timeLimit > 0.0f) {
+        snprintf(line1, sizeof(line1),
+                 "Capas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d  |  Tiempo %.1fs",
+                 gHamburguesa.step, HAMB_ING_COUNT,
+                 gHamburguesa.score, gHamburguesa.hits, gHamburguesa.misses,
+                 gHamburguesa.combo, gHamburguesa.maxCombo,
+                 gHamburguesa.timeLeft);
+    } else {
+        snprintf(line1, sizeof(line1),
+                 "Capas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d",
+                 gHamburguesa.step, HAMB_ING_COUNT,
+                 gHamburguesa.score, gHamburguesa.hits, gHamburguesa.misses,
+                 gHamburguesa.combo, gHamburguesa.maxCombo);
+    }
+    float s1 = 0.33f;
+    float w1 = gText->MeasureWidth(line1, s1);
+    if (w1 > panelW - 20.0f) { s1 = 0.28f; w1 = gText->MeasureWidth(line1, s1); }
+    gText->RenderText(line1, panelX + (panelW - w1) * 0.5f, panelY + 56.0f,
+                      s1, glm::vec3(0.96f, 0.96f, 1.0f));
+
+    // Linea 2: estado / receta.
+    char line2[200];
+    glm::vec3 stateCol = glm::vec3(0.75f, 0.82f, 0.96f);
+    if (gHamburguesa.finished && !gHamburguesa.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "HAMBURGUESA LISTA  -  Score final %d   |   TAB para cerrar",
+                 gHamburguesa.score);
+        stateCol = glm::vec3(0.55f, 1.00f, 0.65f);
+    } else if (gHamburguesa.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "Tiempo agotado en la capa %d/%d   |   Pulsa B para reintentar",
+                 gHamburguesa.step, HAMB_ING_COUNT);
+        stateCol = glm::vec3(1.00f, 0.45f, 0.40f);
+    } else if (gHamburguesa.lastWrong) {
+        snprintf(line2, sizeof(line2),
+                 "FALLO  -  Te toca la capa %s (tecla %s)",
+                 HAMB_NAMES[gHamburguesa.step], HAMB_KEY_HINT[gHamburguesa.step]);
+        stateCol = glm::vec3(1.00f, 0.55f, 0.45f);
+    } else {
+        snprintf(line2, sizeof(line2),
+                 "RECETA  -  Siguiente capa: %s (tecla %s)   |   TAB para salir",
+                 HAMB_NAMES[gHamburguesa.step], HAMB_KEY_HINT[gHamburguesa.step]);
+    }
+    float s2 = 0.32f;
+    float w2 = gText->MeasureWidth(line2, s2);
+    if (w2 > panelW - 20.0f) { s2 = 0.28f; w2 = gText->MeasureWidth(line2, s2); }
+    gText->RenderText(line2, panelX + (panelW - w2) * 0.5f, panelY + 30.0f,
+                      s2, stateCol);
+
+    // Footer: orden de la receta resumido.
+    char line3[160];
+    snprintf(line3, sizeof(line3),
+             "Receta: plato -> pan inf -> carne -> queso -> jitomate -> lechuga -> pan sup");
+    float s3 = 0.26f;
+    float w3 = gText->MeasureWidth(line3, s3);
+    if (w3 > panelW - 20.0f) { s3 = 0.22f; w3 = gText->MeasureWidth(line3, s3); }
+    gText->RenderText(line3, panelX + (panelW - w3) * 0.5f, panelY + 8.0f,
+                      s3, glm::vec3(0.62f, 0.70f, 0.85f));
+
+    glEnable(GL_DEPTH_TEST);
 }
 
 // ============ ESPECTROGRAFIA DEL METEORITO ============
