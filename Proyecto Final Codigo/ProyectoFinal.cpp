@@ -76,9 +76,7 @@ void EspectroSetColor(int spectralIdx);
 static void EspectroStopBar();
 static void EspectroNextRound();
 static float EspectroLinePos(int idx);
-// Posicion del meteorito y chase cam que lo sigue por su orbita. Se
-// declaran aqui porque ComputeView (definida antes) los usa cuando el
-// minijuego de espectrografia esta activo.
+// Forward de meteorito + chase cam (usado por ComputeView).
 glm::vec3 EspectroMeteorPos(float t);
 void EspectroChaseCam(glm::vec3& eye, glm::vec3& target);
 
@@ -91,9 +89,7 @@ void EnergiaPress(int button);
 void InitReciclajeGame();
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
 
-// Hamburguesa (zona CAPSULAS): minijuego de armado por capas. El jugador
-// pulsa una tecla por capa siguiendo la receta y la torta se construye
-// visualmente sobre la mesa de la zona de practicas.
+// Hamburguesa (zona CAPSULAS): armado por capas con teclas T Y U I O P.
 void InitHamburguesaGame();
 void UpdateHamburguesaGame(float dt);
 void DrawHamburguesaGame(const glm::mat4& projection, const glm::mat4& view);
@@ -303,18 +299,10 @@ MenuState menuState = MENU_NONE;
 int menuSelection = 0;
 bool showMinimap = true;
 
-// =============================================================
-// VIDA DEL ASTRONAUTA: 5 barras de estatus + flags de progreso
-// =============================================================
-// La narrativa del juego es la vida cotidiana en una base sustentable: el
-// jugador debe mantener agua, comida, oxigeno, energia de la base y tareas
-// asignadas. Cada barra se llena cumpliendo una accion concreta:
-//   - AGUA / COMIDA: preparar comida en CAPSULAS (requiere haber regado las
-//     plantas antes, en el invernadero).
-//   - OXIGENO: la estacion lo provee al 100% siempre.
-//   - ENERGIA: termina el Simon del reactor.
-//   - TAREAS: termina el espectro del cometa Y el reciclaje.
-// Todas arrancan en 0.20 (excepto oxigeno = 1.0) y suben a 1.0 al cumplir.
+// ============ VIDA DEL ASTRONAUTA: barras de estatus + flags ============
+// 5 barras (agua/comida/oxigeno/energia/tareas) + flags de minijuegos
+// completados. gStats.tareas se recalcula en DrawQuestsWidget como
+// doneCount/N_QUESTS, asi que la barra siempre cuadra con el manual.
 struct PlayerStats {
     float agua    = 0.20f;
     float comida  = 0.20f;
@@ -552,19 +540,9 @@ struct ReciclajeGame {
     int selectedBox = 0;       // 0..4 caja interactiva activa para mover en X/Y/Z
 };
 
-// --- Espectrografia del meteorito (segundo minijuego del invernadero) ---
-// Mecanica de "punto optimo": una barra horizontal representa el espectro
-// visible (de violeta a rojo) con cuatro lineas de emision de la serie de
-// Balmer del hidrogeno marcadas encima (H-alpha, H-beta, H-gamma, H-delta).
-// Un indicador recorre la barra de izquierda a derecha y rebota; el jugador
-// pulsa SPACE para detenerlo y debe caer dentro del "sweet spot" alrededor
-// de la linea objetivo. A mayor dificultad, mas estrecho el sweet spot.
-// El meteorito adopta en pantalla el color de la linea sobre la que cayo
-// el indicador para que el feedback visual sea inmediato.
-//   - H-alpha (656 nm) -> rojo
-//   - H-beta  (486 nm) -> cyan
-//   - H-gamma (434 nm) -> violeta
-//   - H-delta (410 nm) -> violeta profundo
+// ============ Espectrografia (segundo minijuego del invernadero) ============
+// Barra del espectro visible con 4 lineas de Balmer del hidrogeno. SPACE
+// detiene el indicador; cae dentro del sweet spot -> hit.
 struct EspectroGame {
     Difficulty difficulty = DIFF_EASY;
     bool active = false;
@@ -669,28 +647,13 @@ const glm::vec4 HAMB_CHIP_COLORS[HAMB_ING_COUNT] = {
     glm::vec4(0.94f, 0.78f, 0.40f, 1.0f)  // pan superior - dorado claro
 };
 
-// Posicion mundial del centro de la mesa de practicas (zona CAPSULAS).
-// El modelo CAPSULAS_OPACO.fbx exporta la mesa con la tapa sobre el eje
-// y entre [0.67,0.73]. Con baseModelMat (rot -90 X de Blender Z-up a
-// Y-up) eso queda como un cubo en world space con tapa a y=0.73 y
-// centrado en (x=-14.5, z=0.0). Apilamos el plato + capas sobre ese
-// punto.
+// Tapa de la mesa de practicas (zona CAPSULAS). Las capas se apilan aqui.
 const glm::vec3 HAMB_TABLE_TOP = glm::vec3(-14.5f, 0.73f, 0.0f);
-// Cuanto sube el plato por encima de la tapa de la mesa para evitar
-// z-fight con el mantel/plastico del modelo.
-const float    HAMB_PLATE_LIFT = 0.005f;
-// Escala uniforme aplicada a los modelos del burger. Los fbx vienen
-// exportados a escala de Blender (1 unidad ~ 1 m), asi que el plato
-// con scale 1.0 ocupaba casi todo el cuarto. Lo reducimos a 0.15
-// para que la hamburguesa termine con ~15 cm de diametro sobre la
-// mesa, una hamburguesa creible y que deja ver TODAS las capas.
+const float    HAMB_PLATE_LIFT = 0.005f; // evita z-fight con el mantel
+// Escala de los FBX del burger. 0.15 -> hamburguesa de ~15 cm.
 const float    HAMB_MODEL_SCALE = 0.15f;
 
-// Lineas espectrales del minijuego del meteorito. La serie de Balmer del
-// hidrogeno tiene cuatro lineas en el visible; las usamos como objetivos del
-// "sweet spot" y como colores que toma el meteoro al detener la barra. Las
-// definimos aqui para que SpawnMoonTrail (mas abajo) tambien las pueda
-// consumir sin forward-extern.
+// Lineas de Balmer del hidrogeno (objetivos del espectro).
 const glm::vec4 ESPECTRO_COLORS[4] = {
     glm::vec4(1.00f, 0.10f, 0.18f, 1.0f), // H-alpha  (656 nm) rojo
     glm::vec4(0.15f, 0.95f, 1.00f, 1.0f), // H-beta   (486 nm) cyan
@@ -698,18 +661,11 @@ const glm::vec4 ESPECTRO_COLORS[4] = {
     glm::vec4(0.35f, 0.10f, 1.00f, 1.0f)  // H-delta  (410 nm) violeta profundo
 };
 const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "H-delta" };
-// Longitudes de onda (nm) usadas para situar cada linea sobre la barra del
-// espectro visible (rango 400..700 nm). La posicion en la barra es lineal en
-// nm: pos = (wl - 400) / 300.
+// Longitudes de onda (nm). La barra del espectro va de 400 a 700 nm.
 const float ESPECTRO_NM[4] = { 656.3f, 486.1f, 434.0f, 410.2f };
 
-// Macetas reales del modelo invernadero.obj: usamos solo los maceteros
-// 2 y 3 de las filas 1 (x negativo) y 2 (x positivo). Las notas no caen
-// de arriba: viajan HORIZONTALMENTE desde el muro exterior de su fila
-// hacia su maceta:
-//   - lanes 0,1 (fila IZQUIERDA, F1): notas vienen de -x y scrollean a +x
-//   - lanes 2,3 (fila DERECHA,  F2): notas vienen de +x y scrollean a -x
-// Coordenadas extraidas de los grupos Inv_Macetero_F*_*_Cube en el .obj.
+// Macetas reales del .obj del invernadero (filas F1 y F2, maceteros 2/3).
+// Notas del OSU scrollean horizontalmente desde el muro hacia la maceta.
 const glm::vec3 INV_PLANT_POSITIONS[4] = {
     glm::vec3(-2.189f, 0.0f, -12.863f), // 0 = F1_2 (izq, maceta 2)
     glm::vec3(-2.189f, 0.0f, -15.363f), // 1 = F1_3 (izq, maceta 3)
@@ -727,44 +683,10 @@ static glm::vec3 InvLanePos(int lane) {
 // centro (+x), y viceversa.
 const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 
-// La zona ENERGIA tiene 6 pilas (L_1..L_3 y R_1..R_3). El minijuego de
-// luces (Simon dice) usa SOLO una pila para concentrar la atencion del
-// jugador: la pila R_1 (cara frontal contra la pared +X, fondo +Z de la
-// sala). Esa pila trae 12 botones reales del modelo distribuidos en un
-// grid 3x4 (3 filas en Y, 4 columnas en Z), todos sobre la cara x ~= 5.116.
-// Tomamos 4 botones contiguos del cuadrante superior-izquierdo del grid
-// (filas 1 y 2, columnas 0 y 1) para formar el cuadrado clasico 2x2 del
-// Simon. Encima de cada boton real dibujamos un "plano" coloreado a modo
-// de membrana de tacto (rojo / verde / azul / amarillo). Las coordenadas
-// se leyeron directamente del .obj exportado del Blender (Y-up), que
-// coincide con las coordenadas de mundo en runtime (el render del FBX
-// no aplica rotacion adicional sobre los modelos de zona).
-//
-// Layout en pantalla (camara mira +X, +Z queda a la derecha y +Y arriba):
-//   idx 0 ROJO     -> R_1_20 (top-right en pantalla)
-//   idx 1 VERDE    -> R_1_21 (top-left)
-//   idx 2 AZUL     -> R_1_10 (bot-right)
-//   idx 3 AMARILLO -> R_1_11 (bot-left)
-//
-// IMPORTANTE sobre la coordenada X: el boton fisico es un cubo que va
-// de x=5.076 (cara que mira al jugador) a x=5.116 (cara pegada a la
-// pila). Como la camara queda en X mas chico (~x=2.7) y mira hacia +X,
-// la cara VISIBLE del boton es la de x=5.076. Por eso colocamos el
-// "centro de click" justo sobre esa cara (x=5.076) y la membrana se
-// separa hacia -X (toward camera, OFFSET negativo) para flotar entre
-// la camara y el boton. Antes usabamos x=5.116 con offset positivo y
-// la membrana quedaba DETRAS del boton (oculta por el cubo).
-//
-// Layout DINAMICO segun dificultad (SimonActiveButtons()):
-//   PRINCIPIANTE (4): cuadrado 2x2 sobre las columnas centro de la pila
-//   MEDIO + EXPERTO  (6): fila doble 2x3 cubriendo 3 columnas adyacentes
-// Con 6 botones la membrana cae sobre 3 columnas en lugar de 2, asi la
-// pila se ve mas "encendida" y el reto memoria-color sube de golpe.
-// Shift acumulado de 6 cm en Z negativo: la camara del Simon mira en
-// +X con up +Y, asi que la "izquierda en pantalla" corresponde a -Z
-// mundial. Los cubos quedan corridos a la izquierda del frame del
-// minijuego para que la pila de fondo respire un poco a la derecha
-// (sin perder alineacion con los botones fisicos reales).
+// ============ Layout de botones Simon (zona ENERGIA) ============
+// Botones reales de la pila R_1 leidos del .obj. x=5.076 = cara visible.
+// Modo PRINCIPIANTE: 4 botones (2x2). Modo MEDIO/EXPERTO: 6 (2x3).
+// Z shifted 6 cm a -Z para que el cubo quede mas a la izquierda en cam.
 static const glm::vec3 SIMON_POS_4[4] = {
     glm::vec3(5.076f, 1.50f, 12.84f),  // 0 ROJO     - top-right (R_1_20)
     glm::vec3(5.076f, 1.50f, 12.54f),  // 1 VERDE    - top-left  (R_1_21)
@@ -1241,7 +1163,9 @@ void ChangeZone(int z) {
         break;
     case 1:
         PushNarrative("INVERNADERO: aqui crecen los cultivos de la estacion.");
-        PushNarrative("Tarea: riega las plantas siguiendo el ritmo. Pulsa B para empezar.");
+        PushNarrative("1) Plantar: pulsa P para crecer el helecho fractal.");
+        PushNarrative("2) Regar: pulsa B y atina al ritmo con H J K L.");
+        PushNarrative("3) Cometa: pulsa V para iniciar la espectrografia.");
         break;
     case 2:
         PushNarrative("RECICLAJE: zona de almacen. El modulo de clasificacion esta en mantenimiento.");
@@ -1490,11 +1414,11 @@ bool Start() {
 // devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        // Centro entre las 4 macetas activas (F1_2/F1_3 y F2_2/F2_3),
-        // promedio en z = (-12.86 + -15.36) / 2 ~ -14.1. Vista top-down
-        // con up sobre -z para que el frente del invernadero quede arriba.
-        glm::vec3 center(0.0f, 0.0f, -14.1f);
-        glm::vec3 eye(0.0f, 10.0f, -14.09f);
+        // Cam top-down sobre las 4 macetas activas. En esta cam el up
+        // mundial es -Z, asi que para subir el contenido 1 m en pantalla
+        // movemos eye/center en +Z (de -14.1 a -13.1).
+        glm::vec3 center(0.0f, 0.0f, -13.10f);
+        glm::vec3 eye(0.0f, 10.0f, -13.09f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
@@ -1571,7 +1495,7 @@ glm::mat4 ComputeView() {
 
 glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        return glm::vec3(0.0f, 14.0f, -14.09f);
+        return glm::vec3(0.0f, 14.0f, -13.09f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
         glm::vec3 eye, target;
@@ -1764,10 +1688,21 @@ bool Update() {
             break;
 
         case 1: // INVERNADERO
+            // Luz frontal sobre macetas 2 (z ~ -12.86)
             gLights[0].Position = glm::vec3(0.0f, 7.5f, -12.5f);
             gLights[0].Color = glm::vec4(0.75f, 1.0f, 0.75f, 1.0f);
             gLights[0].Power = glm::vec4(11.0f);
             gLights[0].distance = 40.0f;
+            // Luz trasera sobre macetas 3 (z ~ -15.36) que antes quedaban
+            // oscuras. Usa el slot 3 (capsula1) porque slot 1 lo sobrescribe
+            // la linterna del jugador despues del switch.
+            if (gLights.size() > 3) {
+                gLights[3].Position = glm::vec3(0.0f, 7.5f, -15.5f);
+                gLights[3].Color = glm::vec4(0.78f, 1.0f, 0.78f, 1.0f);
+                gLights[3].Power = glm::vec4(10.0f);
+                gLights[3].distance = 35.0f;
+                gLights[3].type = 0;
+            }
             break;
 
         case 2: // RECICLAJE
@@ -1890,21 +1825,8 @@ bool Update() {
     int alphaMetal = 128;
 
 
-    // Dibuja PUERTA_MODELO en el centro de la hitbox dada con un pulso
-    // de brillo ambiental + boost cuando el jugador se acerca. Se usa
-    // tanto para las 4 puertas del HUB como para las puertas de retorno
-    // de cada zona habitable, asi todas las zonas tienen un marcador
-    // visible donde se activa el teletransporte. doorIdx se usa para
-    // leer doorOpenAmount y deslizar la puerta hacia arriba cuando el
-    // jugador la dispara (apertura tipo blast-door).
-    //
-    // Tinte ACERO FRIO (azul-gris): la textura de la puerta es metal gris
-    // neutro pero las luces de la sala son calidas (HUB: blanco-amarillento,
-    // ENERGIA: naranja del reactor). Si dejamos el tinte blanco, esas luces
-    // lo "doran". Empujamos el material hacia frio (mas azul que rojo) para
-    // compensar y mantener una lectura clara de "puerta de metal" sin tono
-    // dorado. Tambien limitamos el pulso (max 1.3x) para que el tone mapping
-    // ACES no presione zonas brillantes hacia el ambar.
+    // ============ Dibujado de puerta con desliz blast-door ============
+    // Tinte acero frio para compensar luces calidas de las salas.
     auto DrawZoneDoor = [&](int doorIdx, const ZoneDoor& d, float doorYaw) {
         if (!PUERTA_MODELO) return;
         float pulseGlobal = 0.80f + 0.12f * sinf(t * 2.2f);
@@ -4477,23 +4399,9 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    // El modelo ENERGIA_OPACO ya trae los 12 botones fisicos de la pila
-    // R_1. Encima de los botones activos (4 en PRINCIPIANTE, 6 en MEDIO/
-    // EXPERTO) ponemos un CUBO 3D solido del tamanio del boton, que
-    // queda SUPERPUESTO sobre la cara del boton fisico (asoma hacia el
-    // jugador). El cubo reemplaza visualmente al boton de metal gris
-    // por una tapa colorida, asi cuando se enciende en el patron el
-    // jugador ve el cubo entero brillando.
-    //
-    // Sin blending: el cubo es opaco y el render order ya esta
-    // controlado por el depth buffer normal. Si en algun frame el cubo
-    // queda detras del boton fisico (algun angulo extremo), el depth
-    // test ocultaria parte; el offset hacia -X lo evita asomandolo.
-    //
-    // buttonGlow[i] sube a 1.0 cuando el boton se enciende en el
-    // patron o cuando el jugador lo pulsa; decae lento en Update para
-    // que la animacion del patron sea legible. El glow modula brillo
-    // del color y un ligero "infle" del cubo para que se sienta apretado.
+    // ============ Cubo de tapa sobre cada boton activo del Simon ============
+    // Solido opaco, ligeramente offset hacia el jugador (-X). buttonGlow
+    // modula brillo + infle del cubo cuando se ilumina en el patron.
     float t = (float)glfwGetTime();
 
     int nBtns = SimonActiveButtons();
@@ -4621,17 +4529,9 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
 }
 
 // ============ HAMBURGUESA (CAPSULAS) ============
-// Minijuego de armado por capas que se juega sobre la mesa de la zona de
-// practicas (modulo CAPSULAS). Pulsando B se arranca; el jugador debe
-// agregar las capas de la hamburguesa en orden (PAN INFERIOR, CARNE,
-// QUESO, JITOMATE, LECHUGA, PAN SUPERIOR). El plato siempre esta sobre la
-// mesa. Cada acierto apila el modelo correspondiente; un error rompe el
-// combo y suma miss pero deja la torre intacta. En MEDIO/EXPERTO hay un
-// reloj contra el cual jugar; en FACIL no hay reloj.
-//
-// Resultado: al terminar las 6 capas se marca foodPrepared = true,
-// agua y comida saltan a 1.0 (igual que la version simple del cooking
-// timer), y la hamburguesa se queda visible sobre la mesa como prueba.
+// Armado de hamburguesa por capas (T Y U I O P en orden). MEDIO/EXPERTO
+// tienen reloj. Al completar las 6 capas: foodPrepared=true, agua y
+// comida saltan a 1.0 y la hamburguesa queda visible sobre la mesa.
 
 void InitHamburguesaGame() {
     gHamburguesa.step       = 0;
