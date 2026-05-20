@@ -642,10 +642,10 @@ const char* HAMB_NAMES[HAMB_ING_COUNT] = {
     "PAN INFERIOR", "CARNE", "QUESO", "JITOMATE", "LECHUGA", "PAN SUPERIOR"
 };
 const char* HAMB_KEY_HINT[HAMB_ING_COUNT] = {
-    "5", "6", "U", "I", "O", "P"
+    "T", "Y", "U", "I", "O", "P"
 };
 const int HAMB_KEYS[HAMB_ING_COUNT] = {
-    GLFW_KEY_5, GLFW_KEY_6, GLFW_KEY_U, GLFW_KEY_I, GLFW_KEY_O, GLFW_KEY_P
+    GLFW_KEY_T, GLFW_KEY_Y, GLFW_KEY_U, GLFW_KEY_I, GLFW_KEY_O, GLFW_KEY_P
 };
 // Altura visual aproximada por capa (mundo). Cada capa se apila sumando
 // esta cantidad sobre la anterior. Valores conservadores para que las
@@ -759,19 +759,23 @@ const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 //   MEDIO + EXPERTO  (6): fila doble 2x3 cubriendo 3 columnas adyacentes
 // Con 6 botones la membrana cae sobre 3 columnas en lugar de 2, asi la
 // pila se ve mas "encendida" y el reto memoria-color sube de golpe.
+// Shift de 2 cm en Z negativo: la camara del Simon mira en +X con up
+// +Y, asi que la "izquierda en pantalla" corresponde a -Z mundial.
+// Asi los cubos quedan ligeramente desplazados hacia la izquierda del
+// frame del minijuego sin perder alineacion total con los botones.
 static const glm::vec3 SIMON_POS_4[4] = {
-    glm::vec3(5.076f, 1.50f, 12.90f),  // 0 ROJO     - top-right (R_1_20)
-    glm::vec3(5.076f, 1.50f, 12.60f),  // 1 VERDE    - top-left  (R_1_21)
-    glm::vec3(5.076f, 1.10f, 12.90f),  // 2 AZUL     - bot-right (R_1_10)
-    glm::vec3(5.076f, 1.10f, 12.60f)   // 3 AMARILLO - bot-left  (R_1_11)
+    glm::vec3(5.076f, 1.50f, 12.88f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.076f, 1.50f, 12.58f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.076f, 1.10f, 12.88f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.076f, 1.10f, 12.58f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
 static const glm::vec3 SIMON_POS_6[6] = {
-    glm::vec3(5.076f, 1.50f, 12.90f),  // 0 ROJO     - top-right
-    glm::vec3(5.076f, 1.50f, 12.60f),  // 1 VERDE    - top-mid
-    glm::vec3(5.076f, 1.50f, 12.30f),  // 2 AZUL     - top-left
-    glm::vec3(5.076f, 1.10f, 12.90f),  // 3 AMARILLO - bot-right
-    glm::vec3(5.076f, 1.10f, 12.60f),  // 4 NARANJA  - bot-mid
-    glm::vec3(5.076f, 1.10f, 12.30f)   // 5 MAGENTA  - bot-left
+    glm::vec3(5.076f, 1.50f, 12.88f),  // 0 ROJO     - top-right
+    glm::vec3(5.076f, 1.50f, 12.58f),  // 1 VERDE    - top-mid
+    glm::vec3(5.076f, 1.50f, 12.28f),  // 2 AZUL     - top-left
+    glm::vec3(5.076f, 1.10f, 12.88f),  // 3 AMARILLO - bot-right
+    glm::vec3(5.076f, 1.10f, 12.58f),  // 4 NARANJA  - bot-mid
+    glm::vec3(5.076f, 1.10f, 12.28f)   // 5 MAGENTA  - bot-left
 };
 
 // Separacion en X de la membrana respecto a la cara del boton. Negativo
@@ -2364,7 +2368,7 @@ void DrawControlsOverlay() {
         { "Manual del Astronauta",    "Q" },
         { "Liberar / recapturar mouse","ALT" },
         { "Preparar comida (capsulas)",  "B" },
-        { "Capas hamburguesa (capsulas)", "5 6 U I O P" },
+        { "Capas hamburguesa (capsulas)", "T Y U I O P" },
         { "Salir / interrumpir minijuego", "TAB" }
     };
     int n = sizeof(rows) / sizeof(rows[0]);
@@ -2664,7 +2668,7 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY)   out.push_back("Llega a Nivel 3 para estabilizar el reactor (Energia al 100%)");
         break;
     case 4: // CAPSULAS
-        out.push_back("B = arma la hamburguesa en la mesa de practicas  |  5 6 U I O P apilan las capas en orden");
+        out.push_back("B = arma la hamburguesa en la mesa de practicas  |  T Y U I O P apilan las capas en orden");
         if (d <= DIFF_EASY) out.push_back("Receta: pan inferior -> carne -> queso -> jitomate -> lechuga -> pan superior");
         if (d <= DIFF_EASY) out.push_back("FACIL no tiene reloj; MEDIO/EXPERTO te ponen tiempo para servir la torta");
         if (d <= DIFF_EASY) out.push_back("Requiere haber regado las plantas del invernadero (cultivos frescos)");
@@ -2690,7 +2694,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
         case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
         case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
-        case 4: zoneHint = "CAPSULAS: B inicia armar la hamburguesa  |  5 6 U I O P apilan las capas";  break;
+        case 4: zoneHint = "CAPSULAS: B inicia armar la hamburguesa  |  T Y U I O P apilan las capas";  break;
     }
     out.push_back(zoneHint);
     out.push_back("Q manual de tareas  |  H expandir ayuda  |  ALT libera mouse");
@@ -3107,7 +3111,7 @@ void DrawQuestsMenu() {
         { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
         { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
         { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
-        { "Armar la hamburguesa (Capsulas)",         "B + receta 5 6 U I O P en orden", gStats.foodPrepared },
+        { "Armar la hamburguesa (Capsulas)",         "B + receta T Y U I O P en orden", gStats.foodPrepared },
     };
 
     float yTop = panelY + panelH - 140.0f;
@@ -3643,7 +3647,7 @@ void processInput(GLFWwindow* window) {
             }
             InitHamburguesaGame();
             gHamburguesa.active = true;
-            PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta (5 6 U I O P).");
+            PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta (T Y U I O P).");
             std::cout << "[Hamburguesa] Nueva partida (dificultad "
                       << gHamburguesa.difficulty
                       << ", plantsWatered=" << (gStats.plantsWatered ? 1 : 0)
@@ -4424,15 +4428,17 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         float pulse = 0.55f + 0.20f * sinf(t * 2.4f + i * 1.3f);
         glm::vec4 base = SIMON_COLORS[i];
 
-        // Color con boost emisivo: ambient alto y diffuse saturado para
-        // que se lea como una luz encendida aun antes del patron. Al
-        // activarse el glow lo lleva a casi quemado de color (factor
-        // 1.0 + glow * 1.3) sin pasar de blanco.
-        glm::vec4 diff = base * (1.05f + pulse * 0.15f + glow * 1.30f);
+        // Color BRILLO CONSTANTE: ambient alto siempre (no depende de
+        // que haya luces de la sala apuntando al cubo) y diffuse saturado
+        // para que se lea como una luz encendida aun antes del patron.
+        // Al pulsar / sonar en el patron el glow lo lleva a quemado de
+        // color (ambient hasta 2.10, diffuse hasta 3.10) para un destello
+        // bien notorio que el tone mapping comprime sin clipear duro.
+        glm::vec4 diff = base * (1.60f + pulse * 0.20f + glow * 1.80f);
         diff.a = 1.0f;
-        glm::vec4 amb  = base * (0.70f + glow * 0.60f);
+        glm::vec4 amb  = base * (1.20f + 0.10f * pulse + glow * 0.90f);
         amb.a = 1.0f;
-        glm::vec4 spec(0.90f, 0.90f, 0.90f, 1.0f);
+        glm::vec4 spec(0.95f, 0.95f, 0.95f, 1.0f);
         SetMaterial(phongShader, amb, diff, spec, 32);
         phongShader->setFloat("transparency", 1.0f);
 
