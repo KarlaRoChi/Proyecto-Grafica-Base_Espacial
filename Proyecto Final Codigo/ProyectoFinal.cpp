@@ -407,9 +407,12 @@ struct OsuNote {
 
 struct WaterDrop {
     glm::vec3 pos;
-    float vy;
-    float life;
+    glm::vec3 vel;     // velocidad 3D (gravedad solo en y)
+    float life;        // segundos restantes hasta desaparecer
+    float maxLife;     // vida inicial, para fade
     int lane;
+    bool landed = false;   // true cuando toco la tierra de la maceta
+    bool splash = false;   // true si nacio como salpicadura al impactar
 };
 
 struct InvernaderoGame {
@@ -520,28 +523,23 @@ const char* ESPECTRO_NAMES[4] = { "H-alpha", "H-beta", "H-gamma", "H-delta" };
 // nm: pos = (wl - 400) / 300.
 const float ESPECTRO_NM[4] = { 656.3f, 486.1f, 434.0f, 410.2f };
 
-// Macetas distribuidas en dos filas (izquierda y derecha del invernadero),
-// con dos macetas cada una a distinto z. Las notas no caen de arriba: viajan
-// HORIZONTALMENTE desde el exterior del muro hacia su maceta:
-//   - lanes 0,1 (fila IZQUIERDA): notas vienen de -x y scrollean a +x
-//   - lanes 2,3 (fila DERECHA):  notas vienen de +x y scrollean a -x
+// Macetas reales del modelo invernadero.obj: usamos solo los maceteros
+// 2 y 3 de las filas 1 (x negativo) y 2 (x positivo). Las notas no caen
+// de arriba: viajan HORIZONTALMENTE desde el muro exterior de su fila
+// hacia su maceta:
+//   - lanes 0,1 (fila IZQUIERDA, F1): notas vienen de -x y scrollean a +x
+//   - lanes 2,3 (fila DERECHA,  F2): notas vienen de +x y scrollean a -x
+// Coordenadas extraidas de los grupos Inv_Macetero_F*_*_Cube en el .obj.
 const glm::vec3 INV_PLANT_POSITIONS[4] = {
-    glm::vec3(-3.5f, 0.0f,  -8.0f), // 0 = fila izq, atras
-    glm::vec3(-3.5f, 0.0f, -14.0f), // 1 = fila izq, adelante
-    glm::vec3( 3.5f, 0.0f,  -8.0f), // 2 = fila der, atras
-    glm::vec3( 3.5f, 0.0f, -14.0f)  // 3 = fila der, adelante
+    glm::vec3(-2.189f, 0.0f, -12.863f), // 0 = F1_2 (izq, maceta 2)
+    glm::vec3(-2.189f, 0.0f, -15.363f), // 1 = F1_3 (izq, maceta 3)
+    glm::vec3( 2.200f, 0.0f, -12.850f), // 2 = F2_2 (der, maceta 2)
+    glm::vec3( 2.200f, 0.0f, -15.350f)  // 3 = F2_3 (der, maceta 3)
 };
-// En FACIL solo se usan 2 macetas y queremos que coincidan visualmente con
-// las dos primeras macetas reales del modelo del invernadero (mas juntas y
-// desplazadas en +z respecto a la fila izquierda original).
-const glm::vec3 INV_PLANT_POSITIONS_EASY[2] = {
-    glm::vec3(-3.5f, 0.0f,  -8.5f), // 0 = mas hacia el frente
-    glm::vec3(-3.5f, 0.0f, -10.5f)  // 1 = junto a la anterior
-};
-// Devuelve la posicion de la maceta del carril segun la dificultad activa.
+// FACIL usa los carriles 0 y 1 directamente (F1_2 y F1_3), asi se queda
+// pegado a la misma fila de macetas reales sin necesidad de un arreglo
+// alterno.
 static glm::vec3 InvLanePos(int lane) {
-    if (gInvernadero.activeLanes == 2 && lane < 2)
-        return INV_PLANT_POSITIONS_EASY[lane];
     return INV_PLANT_POSITIONS[lane];
 }
 // +1 si la nota viaja hacia +x, -1 si hacia -x. Es decir, las notas de la
@@ -1211,10 +1209,11 @@ bool Start() {
 // devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        // Centro desplazado en +z para encuadrar mejor las macetas reales
-        // del invernadero (corridas hacia el frente del modulo).
-        glm::vec3 center(0.0f, 0.0f, -9.5f);
-        glm::vec3 eye(0.0f, 10.0f, -9.49f);
+        // Centro entre las 4 macetas activas (F1_2/F1_3 y F2_2/F2_3),
+        // promedio en z = (-12.86 + -15.36) / 2 ~ -14.1. Vista top-down
+        // con up sobre -z para que el frente del invernadero quede arriba.
+        glm::vec3 center(0.0f, 0.0f, -14.1f);
+        glm::vec3 eye(0.0f, 10.0f, -14.09f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
@@ -1285,7 +1284,7 @@ glm::mat4 ComputeView() {
 
 glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        return glm::vec3(0.0f, 14.0f, -8.49f);
+        return glm::vec3(0.0f, 14.0f, -14.09f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
         glm::vec3 eye, target;
@@ -3018,16 +3017,25 @@ void InvernaderoHit(int lane) {
         int bonus = 100 + gInvernadero.combo * 5;
         gInvernadero.score += bonus;
 
-        // Spawn de gotas de agua sobre la maceta acertada (animacion de riego)
+        // Spawn de gotas de agua sobre la maceta acertada. Caen casi en
+        // vertical con una leve dispersion horizontal sobre el area de la
+        // maceta real (~0.6 m de diametro). Al impactar generan splashes.
         glm::vec3 base = InvLanePos(lane);
-        for (int k = 0; k < 14; ++k) {
+        for (int k = 0; k < 18; ++k) {
             WaterDrop d;
-            float rx = ((float)rand() / RAND_MAX - 0.5f) * 0.7f;
-            float rz = ((float)rand() / RAND_MAX - 0.5f) * 0.7f;
-            d.pos = base + glm::vec3(rx, 2.5f + ((float)rand() / RAND_MAX) * 0.5f, rz);
-            d.vy = -2.0f - ((float)rand() / RAND_MAX) * 1.5f;
+            float rx = ((float)rand() / RAND_MAX - 0.5f) * 0.55f;
+            float rz = ((float)rand() / RAND_MAX - 0.5f) * 0.55f;
+            d.pos = base + glm::vec3(rx, 2.6f + ((float)rand() / RAND_MAX) * 0.5f, rz);
+            // Velocidad inicial: pequenia dispersion lateral para que el
+            // chorro no se vea robotico, y vy negativa fuerte.
+            float vxJ = ((float)rand() / RAND_MAX - 0.5f) * 0.4f;
+            float vzJ = ((float)rand() / RAND_MAX - 0.5f) * 0.4f;
+            d.vel = glm::vec3(vxJ, -2.2f - ((float)rand() / RAND_MAX) * 1.5f, vzJ);
             d.life = 1.4f;
+            d.maxLife = d.life;
             d.lane = lane;
+            d.landed = false;
+            d.splash = false;
             gInvernadero.drops.push_back(d);
         }
 
@@ -3054,13 +3062,49 @@ void UpdateInvernaderoGame(float dt) {
         gInvernadero.waterEffect[i] -= dt * 2.0f;
         if (gInvernadero.waterEffect[i] < 0.0f) gInvernadero.waterEffect[i] = 0.0f;
     }
-    // Integrar gotas de agua que cayeron al regar
+    // Integrar gotas de agua que cayeron al regar. La altura de aterrizaje
+    // (top de la tierra de la maceta real) es ~0.55 m segun el .obj.
+    const float kLandY = 0.55f;
+    std::vector<WaterDrop> splashSpawn;
     for (auto& d : gInvernadero.drops) {
-        d.vy -= 9.0f * dt;
-        d.pos.y += d.vy * dt;
-        d.life -= dt;
-        if (d.pos.y < 0.1f) { d.pos.y = 0.1f; d.life = std::min(d.life, 0.05f); }
+        if (!d.landed) {
+            d.vel.y -= 9.0f * dt;
+            d.pos   += d.vel * dt;
+            d.life  -= dt;
+            if (d.pos.y <= kLandY) {
+                d.pos.y  = kLandY;
+                d.vel    = glm::vec3(0.0f);
+                d.landed = true;
+                // Truncamos vida para que el splash dure poco y se desvanezca.
+                d.life   = std::min(d.life, 0.35f);
+                d.maxLife = 0.35f;
+                // Splash: dos o tres mini gotas que rebotan hacia afuera y
+                // mueren rapido. Solo si no es a su vez una salpicadura,
+                // para no spawnear cadenas infinitas.
+                if (!d.splash) {
+                    int splashes = 2 + (rand() % 2);
+                    for (int s = 0; s < splashes; ++s) {
+                        WaterDrop sp;
+                        float ang = ((float)rand() / RAND_MAX) * 6.2831853f;
+                        float spd = 0.7f + ((float)rand() / RAND_MAX) * 0.6f;
+                        sp.pos = d.pos + glm::vec3(0.0f, 0.02f, 0.0f);
+                        sp.vel = glm::vec3(cosf(ang) * spd, 1.0f + ((float)rand() / RAND_MAX) * 0.6f, sinf(ang) * spd);
+                        sp.life    = 0.30f + ((float)rand() / RAND_MAX) * 0.10f;
+                        sp.maxLife = sp.life;
+                        sp.lane    = d.lane;
+                        sp.landed  = false;
+                        sp.splash  = true;
+                        splashSpawn.push_back(sp);
+                    }
+                }
+            }
+        }
+        else {
+            // Una vez asentada, solo vive su splash time y se va.
+            d.life -= dt;
+        }
     }
+    for (auto& sp : splashSpawn) gInvernadero.drops.push_back(sp);
     gInvernadero.drops.erase(
         std::remove_if(gInvernadero.drops.begin(), gInvernadero.drops.end(),
                        [](const WaterDrop& d) { return d.life <= 0.0f; }),
@@ -3114,9 +3158,9 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
     // 1) Guia translucida de color sobre cada maceta ACTIVA. Solo color
     //    (sin textura del modelo) para que sea limpia y solo guie al
-    //    jugador hacia la maceta correcta. Cubo bajo y ancho a la altura
-    //    de la maceta.
-    float laneCylSize = (lanes == 2) ? 0.70f : 1.10f;
+    //    jugador hacia la maceta correcta. Cubo bajo y ancho dimensionado
+    //    a la maceta real (~1.4 m de ancho, 1.6 m de fondo segun el .obj).
+    float laneCylSize = 1.30f;
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
@@ -3185,31 +3229,44 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);
 
-    // 3) Gotas de agua animadas: pequenios cubos azul agua que caen hacia
-    //    la maceta justo despues de acertar, con ondeo lateral y brillo
-    //    para que se sienta liquido. El color y la transparencia varian
-    //    con la vida de la gota para un fade-out natural.
+    // 3) Gotas de agua animadas: caen como cubos alargados azul agua y al
+    //    impactar se aplanan como puddle/charco que se desvanece. Splashes
+    //    son cubos pequenios que rebotan hacia afuera. Todo en azul agua
+    //    con leve specular para brillo liquido.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (const WaterDrop& d : gInvernadero.drops) {
-        // Azul agua mas saturado y un toque de cian para verse "fresco".
-        float lifeT = glm::clamp(d.life / 1.4f, 0.0f, 1.0f);
+        float lifeT = (d.maxLife > 0.0f) ? glm::clamp(d.life / d.maxLife, 0.0f, 1.0f) : 0.0f;
+        // Azul agua saturado, con leve variacion de cian segun vida.
         glm::vec4 c(0.20f + 0.10f * lifeT,
-                    0.55f + 0.15f * lifeT,
+                    0.55f + 0.20f * lifeT,
                     0.95f,
-                    glm::clamp(d.life * 0.9f, 0.0f, 0.85f));
-        // Color plano sin textura, leve specular blanco para brillo de agua.
+                    glm::clamp(d.life * 1.8f, 0.0f, 0.85f));
         SetMaterial(phongShader, c, c, glm::vec4(0.8f, 0.9f, 1.0f, 1.0f), 64);
         phongShader->setFloat("transparency", c.a);
 
-        // Ondeo lateral suave: cada gota se mece segun su posicion y vida.
-        float wobble = sinf(gInvernadero.gameTime * 6.0f + d.pos.x * 3.0f + d.pos.z * 2.0f) * 0.06f;
-        float stretch = 0.18f + (1.0f - lifeT) * 0.10f; // se alarga al caer
-
         glm::mat4 m(1.0f);
-        m = glm::translate(m, d.pos + glm::vec3(wobble, 0.0f, wobble * 0.5f));
-        m = glm::scale(m, glm::vec3(0.10f, stretch, 0.10f));
+        if (d.landed) {
+            // Charco aplanado que se expande mientras se desvanece.
+            float spread = 0.18f + (1.0f - lifeT) * 0.25f;
+            m = glm::translate(m, d.pos);
+            m = glm::scale(m, glm::vec3(spread, 0.04f, spread));
+        }
+        else if (d.splash) {
+            // Mini gota rebotando: cubito pequenio, sin estiramiento.
+            m = glm::translate(m, d.pos);
+            m = glm::scale(m, glm::vec3(0.06f));
+        }
+        else {
+            // Gota cayendo: cubo alargado en y, con leve ondeo lateral
+            // dependiente de posicion para que cada gota se mueva un poco
+            // diferente. El estiramiento crece al caer.
+            float wobble  = sinf(gInvernadero.gameTime * 6.0f + d.pos.x * 3.0f + d.pos.z * 2.0f) * 0.05f;
+            float stretch = 0.16f + (1.0f - lifeT) * 0.14f;
+            m = glm::translate(m, d.pos + glm::vec3(wobble, 0.0f, wobble * 0.5f));
+            m = glm::scale(m, glm::vec3(0.09f, stretch, 0.09f));
+        }
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
