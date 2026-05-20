@@ -329,6 +329,7 @@ struct PlayerStats {
     bool recycleDone      = false;  // clasificar todos los items
     bool simonDone        = false;  // memoria del reactor
     bool foodPrepared     = false;  // preparar comida en capsulas
+    bool plantPlanted     = false;  // helecho fractal crecido en invernadero
 };
 PlayerStats gStats;
 
@@ -1813,11 +1814,11 @@ bool Update() {
                 glm::vec3 lightOffset(-0.035f, 0.0f, 0.0f);
                 for (int i = 0; i < nSimon && (size_t)(5 + i) < gLights.size(); ++i) {
                     float glow = gEnergia.buttonGlow[i];
-                    // Brillo x9 acumulado sobre la version original (x3
-                    // sobre el anterior x3). Base 31.5 + boost 76.5 al
-                    // sonar. Distancia se mantiene corta (1.5 m) para
-                    // que la luz no banhe el resto de la sala.
-                    float ambient = 31.5f + 3.60f * sinf(t * 1.5f + i);
+                    // Base 25.2 (anterior 31.5 -20%) para que el cubo
+                    // no quemen los colores en reposo. Glow boost se
+                    // mantiene fuerte (76.5) para que el destello al
+                    // sonar / pulsar siga siendo muy notorio.
+                    float ambient = 25.2f + 2.88f * sinf(t * 1.5f + i);
                     float power = ambient + glow * 76.5f;
                     gLights[5 + i].Position = SimonButtonPos(i) + lightOffset;
                     gLights[5 + i].Color = SIMON_COLORS[i];
@@ -2700,10 +2701,10 @@ static std::vector<std::string> BuildCompactHelpLines() {
     const char* zoneHint = "";
     switch (currentZone) {
         case 0: zoneHint = "HUB: camina a una puerta luminosa para entrar a un modulo";        break;
-        case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa";       break;
+        case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa  |  P = plantar (fractal)  |  R = reiniciar";       break;
         case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
-        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Clic en la membrana o Z X C V";        break;
-        case 4: zoneHint = "CAPSULAS: B inicia armar la hamburguesa  |  T Y U I O P apilan las capas";  break;
+        case 3: zoneHint = "ENERGIA: B inicia Simon  |  Z X C V (N M)  |  R = reiniciar";       break;
+        case 4: zoneHint = "CAPSULAS: B = armar hamburguesa  |  T Y U I O P apilan capas  |  R = reiniciar";  break;
     }
     out.push_back(zoneHint);
     out.push_back("Q manual de tareas  |  H expandir ayuda  |  ALT libera mouse");
@@ -2974,7 +2975,9 @@ void DrawQuestsWidget() {
     if (!gText || !gText->ready) return;
 
     struct Mini { const char* title; bool done; };
-    Mini quests[5] = {
+    const int N_QUESTS = 6;
+    Mini quests[N_QUESTS] = {
+        { "Plantar planta",      gStats.plantPlanted  },
         { "Regar plantas",       gStats.plantsWatered },
         { "Catalogar cometa",    gStats.cometDone     },
         { "Visitar almacen",     gStats.recycleDone   },
@@ -2983,10 +2986,13 @@ void DrawQuestsWidget() {
     };
     int doneCount = 0;
     int firstPending = -1;
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < N_QUESTS; ++i) {
         if (quests[i].done) doneCount++;
         else if (firstPending < 0) firstPending = i;
     }
+    // Sincroniza la barra de TAREAS con el conteo real: avanza 1/N por
+    // cada quest cumplida. Asi la barra siempre cuadra con el manual.
+    gStats.tareas = (float)doneCount / (float)N_QUESTS;
 
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
@@ -2995,7 +3001,7 @@ void DrawQuestsWidget() {
     const float panelW  = 260.0f;
     const float headerH = 50.0f;
     const float rowH    = 24.0f;
-    const float panelH  = headerH + 5 * rowH + 18.0f;
+    const float panelH  = headerH + N_QUESTS * rowH + 18.0f;
     const float x = 12.0f;
     const float y = (SCR_HEIGHT - panelH) * 0.55f;
 
@@ -3040,7 +3046,7 @@ void DrawQuestsWidget() {
 
     // Filas: chip + titulo. Verde con OK si completa; gris con > si es la
     // siguiente pendiente; gris suave en las demas.
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < N_QUESTS; ++i) {
         float ry = y + panelH - headerH - 14.0f - (i + 1) * rowH + 4.0f;
 
         // Fondo de fila zebra y resaltado para la pendiente actual.
@@ -3115,19 +3121,23 @@ void DrawQuestsMenu() {
                      glm::vec3(0.75f, 0.80f, 0.90f));
 
     struct Quest { const char* title; const char* hint; bool done; };
-    Quest quests[5] = {
-        { "Regar las plantas (Invernadero)",        "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
-        { "Catalogar el cometa (Invernadero)",      "Espectro: V para iniciar, SPACE", gStats.cometDone },
+    const int N_QUESTS_MENU = 6;
+    Quest quests[N_QUESTS_MENU] = {
+        { "Plantar la planta (Invernadero)",         "Crece el helecho fractal con P (3 iteraciones)", gStats.plantPlanted },
+        { "Regar las plantas (Invernadero)",         "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
+        { "Catalogar el cometa (Invernadero)",       "Espectro: V para iniciar, SPACE", gStats.cometDone },
         { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
         { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
         { "Armar la hamburguesa (Capsulas)",         "B + receta T Y U I O P en orden", gStats.foodPrepared },
     };
 
     float yTop = panelY + panelH - 140.0f;
-    float lineH = 56.0f;
+    // Achicar un poco el lineH para que las 6 quests entren sin
+    // pegarse al borde inferior del panel.
+    float lineH = 48.0f;
     float labelX = panelX + 60.0f;
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < N_QUESTS_MENU; ++i) {
         float y = yTop - i * lineH;
         DrawQuad2D(panelX + 30.0f, y - 16.0f, panelW - 60.0f, lineH - 8.0f,
                    glm::vec4(1.0f, 1.0f, 1.0f, 0.04f));
@@ -3404,6 +3414,13 @@ void processInput(GLFWwindow* window) {
                 fractalIteration++;
                 miPlantaFractal->Generate(fractalIteration);
                 std::cout << "Iteracion de helecho: " << fractalIteration << std::endl;
+                // Al alcanzar la iteracion 3 el helecho ya tiene
+                // suficientes ramas para sentirse "crecido": palomeamos
+                // la tarea "Plantar planta" del manual.
+                if (!gStats.plantPlanted && fractalIteration >= 3) {
+                    gStats.plantPlanted = true;
+                    PushNarrative("Helecho cultivado. Tarea 'Plantar planta' completada.");
+                }
             }
         }
         keyPLast = pPressed;
@@ -3452,6 +3469,21 @@ void processInput(GLFWwindow* window) {
             std::cout << "[Invernadero] Nueva partida (dificultad " << gInvernadero.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
+
+        // R = reiniciar el minijuego activo desde cero (mismas reglas y
+        // dificultad). Util cuando el jugador falla y quiere empezar de
+        // nuevo sin tener que pulsar TAB primero. Aplica al OSU y al
+        // espectro (mas abajo se atiende espectro).
+        static bool keyR_InvLast = false;
+        bool rInv = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+        if (rInv && !keyR_InvLast && gInvernadero.active) {
+            InitInvernaderoGame();
+            gInvernadero.active = true;
+            gInvernadero.topDown = true;
+            PushNarrative("Invernadero reiniciado. A regar de nuevo.");
+            std::cout << "[Invernadero] RESET" << std::endl;
+        }
+        keyR_InvLast = rInv;
 
         // TAB interrumpe el minijuego (sale de la vista cenital y suelta camara)
         if (gMinigameCamLocked && gInvernadero.active) {
@@ -3521,6 +3553,17 @@ void processInput(GLFWwindow* window) {
             }
             eSpaceLast = spaceNow;
 
+            // R = reiniciar la espectrografia (vuelve a la ronda 1).
+            static bool keyR_EspLast = false;
+            bool rEsp = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+            if (rEsp && !keyR_EspLast) {
+                InitEspectroGame();
+                gEspectro.active = true;
+                PushNarrative("Espectrografia reiniciada.");
+                std::cout << "[Espectro] RESET" << std::endl;
+            }
+            keyR_EspLast = rEsp;
+
             // TAB interrumpe el espectro
             static bool tabIntEsp = false;
             bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
@@ -3565,6 +3608,17 @@ void processInput(GLFWwindow* window) {
             std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
         }
         keyBLast = bKey;
+
+        // R = reiniciar el Simon (vuelve al patron inicial de la dificultad).
+        static bool keyR_EnLast = false;
+        bool rEn = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+        if (rEn && !keyR_EnLast && gEnergia.active) {
+            InitEnergiaGame();
+            gEnergia.active = true;
+            PushNarrative("Simon reiniciado. A memorizar de nuevo.");
+            std::cout << "[Energia] RESET" << std::endl;
+        }
+        keyR_EnLast = rEn;
 
         // TAB = interrumpir el minijuego
         if (gMinigameCamLocked && gEnergia.active) {
@@ -3674,6 +3728,18 @@ void processInput(GLFWwindow* window) {
                 if (now && !keyLast[i]) HamburguesaPress(i);
                 keyLast[i] = now;
             }
+
+            // R = reiniciar la hamburguesa (vuelve al paso 0). Util
+            // incluso despues de terminar para volver a armar otra.
+            static bool keyR_HambLast = false;
+            bool rHamb = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+            if (rHamb && !keyR_HambLast) {
+                InitHamburguesaGame();
+                gHamburguesa.active = true;
+                PushNarrative("Hamburguesa reiniciada. Vuelve a apilar las capas.");
+                std::cout << "[Hamburguesa] RESET" << std::endl;
+            }
+            keyR_HambLast = rHamb;
 
             // TAB interrumpe el minijuego y deja el progreso parcial visible
             // sobre la mesa (las capas ya colocadas no se borran, asi el
@@ -4437,14 +4503,13 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         float pulse = 0.55f + 0.20f * sinf(t * 2.4f + i * 1.3f);
         glm::vec4 base = SIMON_COLORS[i];
 
-        // Color BRILLO CONSTANTE x9 acumulado (x3 sobre x3 anterior):
-        // ambient y diffuse triplicados otra vez. Confiamos en el tone
-        // mapping ACES para que los picos no se quemen a blanco puro y
-        // conserven el matiz del color. Al pulsar / sonar en el patron
-        // el glow boost tambien va x3, dejando un destello muy notorio.
-        glm::vec4 diff = base * (14.40f + pulse * 1.80f + glow * 16.20f);
+        // Color BRILLO: la base constante baja 20% (estaba pasando a
+        // blanco quemado en reposo). El boost de glow se conserva
+        // intacto para que el destello al sonar / pulsar siga siendo
+        // muy notorio sobre la base mas tenue.
+        glm::vec4 diff = base * (11.52f + pulse * 1.44f + glow * 16.20f);
         diff.a = 1.0f;
-        glm::vec4 amb  = base * (10.80f + 0.90f * pulse + glow * 8.10f);
+        glm::vec4 amb  = base * (8.64f + 0.72f * pulse + glow * 8.10f);
         amb.a = 1.0f;
         glm::vec4 spec(0.95f, 0.95f, 0.95f, 1.0f);
         SetMaterial(phongShader, amb, diff, spec, 32);
@@ -5048,11 +5113,10 @@ static void EspectroStopBar() {
         PushNarrative(buf);
 
         // Marca el cometa como terminado si tuvo mas aciertos que fallos.
-        // Suma medio relleno a la barra de tareas (la otra mitad la pone
-        // reciclaje); cuando ambas tareas se cumplen la barra llega al 100%.
+        // (gStats.tareas se recalcula en DrawQuestsWidget como
+        // doneCount/N_QUESTS, asi que aqui basta con setear el flag.)
         if (!gStats.cometDone && gEspectro.hits > gEspectro.misses) {
             gStats.cometDone = true;
-            gStats.tareas    = gStats.recycleDone ? 1.0f : 0.60f;
             PushNarrative("Cometa catalogado. Tarea cientifica registrada.");
         }
     }
