@@ -1112,6 +1112,19 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone) {
     return false;
 }
 
+// ============ Stop de todos los minijuegos en curso ============
+// Llamado antes de arrancar uno nuevo (B/V) para que no se encimen
+// vistas / HUDs / camaras bloqueadas. No resetea sus stats, solo
+// apaga el flag .active y suelta la camara fija.
+static void StopActiveMinigames() {
+    gInvernadero.active = false;
+    gInvernadero.topDown = false;
+    gEspectro.active    = false;
+    gEnergia.active     = false;
+    gHamburguesa.active = false;
+    gMinigameCamLocked  = false;
+}
+
 void ChangeZone(int z) {
     if (z < 0 || z >= 5) return;
     currentZone = z;
@@ -1414,11 +1427,11 @@ bool Start() {
 // devolvemos un par eye/target propios y bloqueamos el mouse en ese frame.
 glm::mat4 ComputeView() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        // Cam top-down sobre las 4 macetas activas. En esta cam el up
-        // mundial es -Z, asi que para subir el contenido 1 m en pantalla
-        // movemos eye/center en +Z (de -14.1 a -13.1).
-        glm::vec3 center(0.0f, 0.0f, -13.10f);
-        glm::vec3 eye(0.0f, 10.0f, -13.09f);
+        // Cam top-down sobre las macetas. center/eye.z = -12.1 (acumulado
+        // +2 m en +Z para subir el contenido 2 m en pantalla). eye.y = 9
+        // (camara 1 m mas cerca del suelo para acercar la vista).
+        glm::vec3 center(0.0f, 0.0f, -12.10f);
+        glm::vec3 eye(0.0f, 9.0f, -12.09f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
@@ -1495,7 +1508,7 @@ glm::mat4 ComputeView() {
 
 glm::vec3 ComputeEyePos() {
     if (currentZone == 1 && gInvernadero.active && gInvernadero.topDown) {
-        return glm::vec3(0.0f, 14.0f, -13.09f);
+        return glm::vec3(0.0f, 13.0f, -12.09f);
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
         glm::vec3 eye, target;
@@ -3380,13 +3393,12 @@ void processInput(GLFWwindow* window) {
         //     camara automaticamente). TAB durante el juego = "interrumpir".
         bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bKey && !keyBLast) {
+            StopActiveMinigames();
             InitInvernaderoGame();
             gInvernadero.active = true;
             gInvernadero.topDown = true;
-            if (!gMinigameCamLocked) {
-                gCamModeBeforeLock = cameraMode;
-                gMinigameCamLocked = true;
-            }
+            gCamModeBeforeLock = cameraMode;
+            gMinigameCamLocked = true;
             PushNarrative("INVERNADERO: pulsa H J K L cuando la nota llegue a su maceta.");
             std::cout << "[Invernadero] Nueva partida (dificultad " << gInvernadero.difficulty << ")" << std::endl;
         }
@@ -3449,15 +3461,11 @@ void processInput(GLFWwindow* window) {
         static bool vLast = false;
         bool vKey = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
         if (vKey && !vLast) {
+            StopActiveMinigames();
             InitEspectroGame();
             gEspectro.active = true;
-            // Apagamos el ritmo de plantas para no superponer dos vistas.
-            gInvernadero.active = false;
-            gInvernadero.topDown = false;
-            if (!gMinigameCamLocked) {
-                gCamModeBeforeLock = cameraMode;
-                gMinigameCamLocked = true;
-            }
+            gCamModeBeforeLock = cameraMode;
+            gMinigameCamLocked = true;
             PushNarrative("ESPECTROGRAFIA: pulsa SPACE para detener la barra sobre la linea objetivo.");
         }
         vLast = vKey;
@@ -3520,12 +3528,11 @@ void processInput(GLFWwindow* window) {
         // B = iniciar/reiniciar partida (bloquea la camara frente al reactor)
         bool bKey = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bKey && !keyBLast) {
+            StopActiveMinigames();
             InitEnergiaGame();
             gEnergia.active = true;
-            if (!gMinigameCamLocked) {
-                gCamModeBeforeLock = cameraMode;
-                gMinigameCamLocked = true;
-            }
+            gCamModeBeforeLock = cameraMode;
+            gMinigameCamLocked = true;
             PushNarrative("ENERGIA: memoriza el orden de las luces. Pulsa Z X C V o haz clic en el boton.");
             std::cout << "[Energia] Nueva partida (dificultad " << gEnergia.difficulty << ")" << std::endl;
         }
@@ -3623,13 +3630,10 @@ void processInput(GLFWwindow* window) {
         static bool keyBCapLast = false;
         bool bCap = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bCap && !keyBCapLast && !gHamburguesa.active && !gStats.foodPrepared) {
-            // Antes el minijuego pedia tener las plantas regadas para
-            // iniciar, pero eso lo dejaba dependiente del invernadero y
-            // bloqueaba el testeo. Ahora B siempre arranca; si no se ha
-            // regado todavia, solo avisamos como pista narrativa.
             if (!gStats.plantsWatered) {
                 PushNarrative("Tip: idealmente riegas las plantas antes para tener insumos.");
             }
+            StopActiveMinigames();
             InitHamburguesaGame();
             gHamburguesa.active = true;
             PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta (T Y U I O P).");
