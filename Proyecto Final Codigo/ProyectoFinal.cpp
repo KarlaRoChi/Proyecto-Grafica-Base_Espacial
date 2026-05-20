@@ -1911,7 +1911,7 @@ bool Update() {
         m = glm::translate(m, d.center + glm::vec3(0.0f, yOffset, 0.0f));
         m = glm::rotate(m, glm::radians(doorYaw), glm::vec3(0.0f, 1.0f, 0.0f));
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.6f));
+        m = glm::scale(m, glm::vec3(1.0f));
         phongShader->setMat4("model", m);
         PUERTA_MODELO->Draw(*phongShader);
     };
@@ -3627,15 +3627,20 @@ void processInput(GLFWwindow* window) {
         static bool keyBCapLast = false;
         bool bCap = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
         if (bCap && !keyBCapLast && !gHamburguesa.active && !gStats.foodPrepared) {
+            // Antes el minijuego pedia tener las plantas regadas para
+            // iniciar, pero eso lo dejaba dependiente del invernadero y
+            // bloqueaba el testeo. Ahora B siempre arranca; si no se ha
+            // regado todavia, solo avisamos como pista narrativa.
             if (!gStats.plantsWatered) {
-                PushNarrative("Necesitas regar las plantas del invernadero primero.");
-            } else {
-                InitHamburguesaGame();
-                gHamburguesa.active = true;
-                PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta.");
-                std::cout << "[Hamburguesa] Nueva partida (dificultad "
-                          << gHamburguesa.difficulty << ")" << std::endl;
+                PushNarrative("Tip: idealmente riegas las plantas antes para tener insumos.");
             }
+            InitHamburguesaGame();
+            gHamburguesa.active = true;
+            PushNarrative("MESA DE PRACTICAS: arma la hamburguesa siguiendo la receta (5 6 U I O P).");
+            std::cout << "[Hamburguesa] Nueva partida (dificultad "
+                      << gHamburguesa.difficulty
+                      << ", plantsWatered=" << (gStats.plantsWatered ? 1 : 0)
+                      << ")" << std::endl;
         }
         keyBCapLast = bCap;
 
@@ -3929,11 +3934,15 @@ void UpdateInvernaderoGame(float dt) {
                       << "  MaxCombo=" << gInvernadero.maxCombo << std::endl;
             reported = true;
         }
-        // Exito si acerto TODAS las notas. Marca plants_watered y desbloquea
-        // la preparacion de comida en capsulas. Solo dispara una vez por
+        // Exito si acerto >=60% de las notas. Marca plants_watered y
+        // desbloquea la preparacion de comida en capsulas. Antes pedia
+        // hits == notes (perfecto), pero un solo miss bloqueaba todo el
+        // flujo y obligaba a reiniciar. Solo dispara una vez por
         // partida; el flag persiste hasta que se reinicia el minijuego.
-        if (!gStats.plantsWatered &&
-            gInvernadero.hits >= (int)gInvernadero.notes.size()) {
+        int total = (int)gInvernadero.notes.size();
+        int needed = (total * 6) / 10; // 60%
+        if (needed < 1) needed = 1;
+        if (!gStats.plantsWatered && gInvernadero.hits >= needed) {
             gStats.plantsWatered = true;
             PushNarrative("Plantas regadas. Ya puedes preparar comida en CAPSULAS.");
         }
@@ -3961,19 +3970,26 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
     // 1) Guia translucida de color sobre cada maceta ACTIVA. Solo color
     //    (sin textura del modelo) para que sea limpia y solo guie al
-    //    jugador hacia la maceta correcta. Cubo bajo y ancho dimensionado
-    //    a la maceta real (~1.4 m de ancho, 1.6 m de fondo segun el .obj).
-    float laneCylSize = 1.30f;
+    //    jugador hacia la maceta correcta. Disco bajo dimensionado al area
+    //    REAL de plantacion de la maceta (~0.55 m de diametro de tierra
+    //    segun el .obj), no a todo el macetero. Asi cada carril cabe
+    //    exactamente sobre la tierra y se ve "regado" la planta, no la
+    //    sala completa.
+    float laneCylSize = 0.62f;
+    float laneCylH    = 0.35f;
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
     for (int i = 0; i < lanes; i++) {
         glm::vec3 base = InvLanePos(i);
-        base.y = 0.4f;
+        // Apoyar el disco sobre la tierra de la maceta (~0.55 m segun .obj)
+        // para que flote sutilmente encima en lugar de envolver todo el
+        // macetero.
+        base.y = 0.70f;
         float pulse = 0.50f + 0.25f * sinf(gInvernadero.gameTime * 1.8f + i);
         float waterBoost = gInvernadero.waterEffect[i];
         glm::vec4 c = laneColors[i];
-        c.a = 0.30f + 0.15f * pulse + waterBoost * 0.30f;
+        c.a = 0.35f + 0.20f * pulse + waterBoost * 0.30f;
         // Ambient alto y diffuse igual al color para que el cubo se vea
         // como un color plano translucido (no se modula con la textura).
         SetMaterial(phongShader, c, c, glm::vec4(0.0f), 1);
@@ -3981,7 +3997,7 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
 
         glm::mat4 m(1.0f);
         m = glm::translate(m, base);
-        m = glm::scale(m, glm::vec3(laneCylSize, 0.9f, laneCylSize));
+        m = glm::scale(m, glm::vec3(laneCylSize, laneCylH, laneCylSize));
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
@@ -4013,18 +4029,23 @@ void DrawInvernaderoGame(const glm::mat4& projection, const glm::mat4& view) {
         start.x -= INV_SCROLL_DIR[n.lane] * scrollDist;
         float a = glm::clamp(1.0f - (tToHit / lookAhead), 0.0f, 1.0f);
         glm::vec3 pos = glm::mix(start, target, a);
-        pos.y = 0.35f;
+        // Volar las notas a la altura de la guia translucida (~0.7 m) para
+        // que crucen por encima de la tierra de la maceta, no atravesando
+        // el macetero.
+        pos.y = 0.80f;
 
         glm::vec4 c = laneColors[n.lane];
-        c.a = 0.70f; // translucido pero todavia bien visible
+        c.a = 0.80f; // translucido pero todavia bien visible
         // Color plano: ambient=diffuse=color, sin specular para que no se
         // vea la textura del modelo ni reflejos, solo un color limpio.
         SetMaterial(phongShader, c, c, glm::vec4(0.0f), 1);
         phongShader->setFloat("transparency", c.a);
 
+        // Notas mas chicas para que se vean como punto de impacto sobre
+        // la maceta y no como cubos que rebasan el diametro del carril.
         glm::mat4 m(1.0f);
         m = glm::translate(m, pos);
-        m = glm::scale(m, glm::vec3(0.28f));
+        m = glm::scale(m, glm::vec3(0.18f));
         phongShader->setMat4("model", m);
         CUBO_MODELO->Draw(*phongShader);
     }
@@ -4177,20 +4198,26 @@ void EnergiaPress(int button) {
 }
 
 void UpdateEnergiaGame(float dt) {
+    // Decay mas lento que antes (2.5 -> 1.4/s) para que la membrana del
+    // boton pulsado por el jugador linguer visiblemente. La fase de
+    // mostrar patron sobrescribe este valor con 1.0 durante la ventana
+    // "on" para que el patron NO desaparezca a mitad de cada beat.
     for (int i = 0; i < 6; i++) {
-        gEnergia.buttonGlow[i] -= dt * 2.5f;
+        gEnergia.buttonGlow[i] -= dt * 1.4f;
         if (gEnergia.buttonGlow[i] < 0.0f) gEnergia.buttonGlow[i] = 0.0f;
     }
 
     if (gEnergia.phase == 1) {
-        // Fase de mostrar patron: ilumina uno por uno
-        // velocidad de showing segun dificultad
+        // Fase de mostrar patron: ilumina uno por uno.
+        // velocidad de showing segun dificultad. Subimos onTime para que
+        // el jugador VEA con claridad que boton se prendio en lugar de
+        // un parpadeo de medio segundo apenas iluminado.
         float onTime, offTime;
         switch (gEnergia.difficulty) {
-        case DIFF_EASY:   onTime = 0.55f; offTime = 0.30f; break;
-        case DIFF_MEDIUM: onTime = 0.40f; offTime = 0.20f; break;
-        case DIFF_EXPERT: onTime = 0.25f; offTime = 0.12f; break;
-        default:          onTime = 0.55f; offTime = 0.30f; break;
+        case DIFF_EASY:   onTime = 0.75f; offTime = 0.35f; break;
+        case DIFF_MEDIUM: onTime = 0.55f; offTime = 0.25f; break;
+        case DIFF_EXPERT: onTime = 0.35f; offTime = 0.15f; break;
+        default:          onTime = 0.75f; offTime = 0.35f; break;
         }
 
         gEnergia.phaseTimer -= dt;
@@ -4208,6 +4235,18 @@ void UpdateEnergiaGame(float dt) {
                 gEnergia.buttonGlow[idx] = 1.0f;
                 gEnergia.phaseTimer = onTime + offTime;
             }
+        }
+
+        // Mientras phaseTimer > offTime estamos en la VENTANA ON del
+        // boton actual. Forzamos su glow a 1.0 cada frame para que el
+        // boton no se apague a medias por el decay. Cuando phaseTimer
+        // cae por debajo de offTime, ya estamos en el "gap" entre
+        // botones y dejamos que decaiga normalmente.
+        if (gEnergia.showIndex >= 0 &&
+            gEnergia.showIndex < (int)gEnergia.pattern.size() &&
+            gEnergia.phaseTimer > offTime) {
+            int idx = gEnergia.pattern[gEnergia.showIndex];
+            gEnergia.buttonGlow[idx] = 1.0f;
         }
     }
     else if (gEnergia.phase == 3) {
@@ -4347,30 +4386,30 @@ void DrawEnergiaHUD() {
 }
 
 void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
-    if (!PLANO_MODELO && !CUBO_MODELO) return;
+    if (!CUBO_MODELO) return;
     phongShader->use();
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
     // El modelo ENERGIA_OPACO ya trae los 12 botones fisicos de la pila
     // R_1. Encima de los botones activos (4 en PRINCIPIANTE, 6 en MEDIO/
-    // EXPERTO) dibujamos una "membrana" plana de color (modelo plano.fbx)
-    // CON RESPALDO OSCURO detras para que el color resalte sobre la
-    // textura gris de la pila. El plano se orienta con normal +X y se
-    // separa SIMON_MEMBRANE_OFFSET m (negativo, hacia el jugador) para
-    // flotar claramente DELANTE del cubo del boton.
+    // EXPERTO) ponemos un CUBO 3D solido del tamanio del boton, que
+    // queda SUPERPUESTO sobre la cara del boton fisico (asoma hacia el
+    // jugador). El cubo reemplaza visualmente al boton de metal gris
+    // por una tapa colorida, asi cuando se enciende en el patron el
+    // jugador ve el cubo entero brillando.
     //
-    // buttonGlow[i] sube a 1.0 cuando el boton se enciende (mostrar
-    // patron) o cuando el jugador lo pulsa; decae 2.5/seg en Update.
-    // Mezclamos un pulso lento de "respiracion" para que las membranas
-    // sigan siendo visibles incluso cuando ningun boton esta activo.
+    // Sin blending: el cubo es opaco y el render order ya esta
+    // controlado por el depth buffer normal. Si en algun frame el cubo
+    // queda detras del boton fisico (algun angulo extremo), el depth
+    // test ocultaria parte; el offset hacia -X lo evita asomandolo.
+    //
+    // buttonGlow[i] sube a 1.0 cuando el boton se enciende en el
+    // patron o cuando el jugador lo pulsa; decae lento en Update para
+    // que la animacion del patron sea legible. El glow modula brillo
+    // del color y un ligero "infle" del cubo para que se sienta apretado.
     float t = (float)glfwGetTime();
 
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDepthMask(GL_FALSE);
-
-    Model* membrane = PLANO_MODELO ? PLANO_MODELO : CUBO_MODELO;
     int nBtns = SimonActiveButtons();
     for (int i = 0; i < nBtns; ++i) {
         glm::vec3 pos = SimonButtonPos(i);
@@ -4378,65 +4417,35 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         float pulse = 0.55f + 0.20f * sinf(t * 2.4f + i * 1.3f);
         glm::vec4 base = SIMON_COLORS[i];
 
-        // (1) MARCO OSCURO: plano negro semitransparente un poco mas
-        //     grande que la membrana. Da contraste contra la textura
-        //     metalica gris de la pila, asi el color de la membrana
-        //     se lee de un vistazo aun a media distancia.
-        float marcoSize = 0.130f + glow * 0.020f;
-        if (membrane) {
-            glm::vec4 dark(0.02f, 0.02f, 0.04f, 0.85f);
-            SetMaterial(phongShader, dark, dark, glm::vec4(0.0f), 1);
-            phongShader->setFloat("transparency", dark.a);
-            glm::mat4 mm(1.0f);
-            mm = glm::translate(mm, pos + glm::vec3(SIMON_MEMBRANE_OFFSET * 0.55f, 0.0f, 0.0f));
-            mm = glm::rotate(mm, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-            mm = glm::scale(mm, glm::vec3(marcoSize, 0.005f, marcoSize));
-            phongShader->setMat4("model", mm);
-            membrane->Draw(*phongShader);
-        }
+        // Color con boost emisivo: ambient alto y diffuse saturado para
+        // que se lea como una luz encendida aun antes del patron. Al
+        // activarse el glow lo lleva a casi quemado de color (factor
+        // 1.0 + glow * 1.3) sin pasar de blanco.
+        glm::vec4 diff = base * (1.05f + pulse * 0.15f + glow * 1.30f);
+        diff.a = 1.0f;
+        glm::vec4 amb  = base * (0.70f + glow * 0.60f);
+        amb.a = 1.0f;
+        glm::vec4 spec(0.90f, 0.90f, 0.90f, 1.0f);
+        SetMaterial(phongShader, amb, diff, spec, 32);
+        phongShader->setFloat("transparency", 1.0f);
 
-        // (2) MEMBRANA DE COLOR: plano grande y saturado, casi opaco en
-        //     reposo (alpha 0.85) y totalmente opaco al activarse. Asi
-        //     el jugador SIEMPRE ve las placas, no solo cuando suenan.
-        glm::vec4 diff = base * (0.95f + pulse * 0.25f + glow * 1.20f);
-        diff.a = glm::clamp(0.85f + glow * 0.15f, 0.0f, 1.0f);
-        glm::vec4 amb  = base * (0.55f + glow * 0.60f);
-        amb.a = diff.a;
-        glm::vec4 spec = glm::vec4(0.85f, 0.85f, 0.85f, 1.0f);
-        SetMaterial(phongShader, amb, diff, spec, 16);
-        phongShader->setFloat("transparency", diff.a);
+        // Cubo de tapa: 0.22 m de arista (un poco menos que la
+        // separacion entre botones, 0.30 m, para que no invadan a sus
+        // vecinos). En reposo respira con el pulso; al iluminarse
+        // crece 1.5 cm para sentirse "pulsado".
+        float size = 0.22f + 0.010f * pulse + glow * 0.015f;
+        // Empujamos el cubo 0.09 m hacia el jugador (-X) para que la
+        // cara trasera del cubo quede pegada a la cara del boton fisico
+        // (cara visible en x = 5.076). Asi el cubo "se sienta" sobre el
+        // boton sin flotar ni hundirse demasiado dentro de la pila.
+        glm::vec3 capOffset(-0.09f, 0.0f, 0.0f);
 
-        float size = 0.110f + glow * 0.025f;
         glm::mat4 m(1.0f);
-        m = glm::translate(m, pos + glm::vec3(SIMON_MEMBRANE_OFFSET, 0.0f, 0.0f));
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        m = glm::scale(m, glm::vec3(size, 0.005f, size));
+        m = glm::translate(m, pos + capOffset);
+        m = glm::scale(m, glm::vec3(size));
         phongShader->setMat4("model", m);
-        membrane->Draw(*phongShader);
-
-        // (3) HALO frontal: cuando el boton esta activo, segundo plano
-        //     ligeramente delante con alpha pulsante para que parezca
-        //     "encendido / disparado". Solo cuando glow > 0.05 para no
-        //     gastar draws en reposo.
-        if (glow > 0.05f && membrane) {
-            glm::vec4 haloDiff = base * (1.4f + glow * 0.6f);
-            haloDiff.a = glm::clamp(glow * 0.55f, 0.0f, 0.75f);
-            SetMaterial(phongShader, haloDiff, haloDiff, glm::vec4(0.0f), 1);
-            phongShader->setFloat("transparency", haloDiff.a);
-
-            glm::mat4 hm(1.0f);
-            hm = glm::translate(hm, pos + glm::vec3(SIMON_MEMBRANE_OFFSET * 1.4f, 0.0f, 0.0f));
-            hm = glm::rotate(hm, glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-            float haloSize = size * (1.35f + 0.10f * pulse);
-            hm = glm::scale(hm, glm::vec3(haloSize, 0.005f, haloSize));
-            phongShader->setMat4("model", hm);
-            membrane->Draw(*phongShader);
-        }
+        CUBO_MODELO->Draw(*phongShader);
     }
-
-    phongShader->setFloat("transparency", 1.0f);
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
 }
 
 // ============ RECICLAJE ============
