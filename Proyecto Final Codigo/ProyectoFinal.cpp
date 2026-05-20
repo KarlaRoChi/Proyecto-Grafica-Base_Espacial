@@ -759,24 +759,24 @@ const float INV_SCROLL_DIR[4] = { +1.0f, +1.0f, -1.0f, -1.0f };
 //   MEDIO + EXPERTO  (6): fila doble 2x3 cubriendo 3 columnas adyacentes
 // Con 6 botones la membrana cae sobre 3 columnas en lugar de 2, asi la
 // pila se ve mas "encendida" y el reto memoria-color sube de golpe.
-// Shift acumulado de 5 cm en Z negativo: la camara del Simon mira en
+// Shift acumulado de 6 cm en Z negativo: la camara del Simon mira en
 // +X con up +Y, asi que la "izquierda en pantalla" corresponde a -Z
 // mundial. Los cubos quedan corridos a la izquierda del frame del
 // minijuego para que la pila de fondo respire un poco a la derecha
 // (sin perder alineacion con los botones fisicos reales).
 static const glm::vec3 SIMON_POS_4[4] = {
-    glm::vec3(5.076f, 1.50f, 12.85f),  // 0 ROJO     - top-right (R_1_20)
-    glm::vec3(5.076f, 1.50f, 12.55f),  // 1 VERDE    - top-left  (R_1_21)
-    glm::vec3(5.076f, 1.10f, 12.85f),  // 2 AZUL     - bot-right (R_1_10)
-    glm::vec3(5.076f, 1.10f, 12.55f)   // 3 AMARILLO - bot-left  (R_1_11)
+    glm::vec3(5.076f, 1.50f, 12.84f),  // 0 ROJO     - top-right (R_1_20)
+    glm::vec3(5.076f, 1.50f, 12.54f),  // 1 VERDE    - top-left  (R_1_21)
+    glm::vec3(5.076f, 1.10f, 12.84f),  // 2 AZUL     - bot-right (R_1_10)
+    glm::vec3(5.076f, 1.10f, 12.54f)   // 3 AMARILLO - bot-left  (R_1_11)
 };
 static const glm::vec3 SIMON_POS_6[6] = {
-    glm::vec3(5.076f, 1.50f, 12.85f),  // 0 ROJO     - top-right
-    glm::vec3(5.076f, 1.50f, 12.55f),  // 1 VERDE    - top-mid
-    glm::vec3(5.076f, 1.50f, 12.25f),  // 2 AZUL     - top-left
-    glm::vec3(5.076f, 1.10f, 12.85f),  // 3 AMARILLO - bot-right
-    glm::vec3(5.076f, 1.10f, 12.55f),  // 4 NARANJA  - bot-mid
-    glm::vec3(5.076f, 1.10f, 12.25f)   // 5 MAGENTA  - bot-left
+    glm::vec3(5.076f, 1.50f, 12.84f),  // 0 ROJO     - top-right
+    glm::vec3(5.076f, 1.50f, 12.54f),  // 1 VERDE    - top-mid
+    glm::vec3(5.076f, 1.50f, 12.24f),  // 2 AZUL     - top-left
+    glm::vec3(5.076f, 1.10f, 12.84f),  // 3 AMARILLO - bot-right
+    glm::vec3(5.076f, 1.10f, 12.54f),  // 4 NARANJA  - bot-mid
+    glm::vec3(5.076f, 1.10f, 12.24f)   // 5 MAGENTA  - bot-left
 };
 
 // Separacion en X de la membrana respecto a la cara del boton. Negativo
@@ -1813,12 +1813,12 @@ bool Update() {
                 glm::vec3 lightOffset(-0.035f, 0.0f, 0.0f);
                 for (int i = 0; i < nSimon && (size_t)(5 + i) < gLights.size(); ++i) {
                     float glow = gEnergia.buttonGlow[i];
-                    // Brillo x3 sobre el anterior: base 10.5 (siempre
-                    // muy encendida) + boost 25.5 al sonar. Distancia
-                    // se mantiene corta (1.5 m) para que la luz no
-                    // banhe el resto de la sala.
-                    float ambient = 10.5f + 1.20f * sinf(t * 1.5f + i);
-                    float power = ambient + glow * 25.5f;
+                    // Brillo x9 acumulado sobre la version original (x3
+                    // sobre el anterior x3). Base 31.5 + boost 76.5 al
+                    // sonar. Distancia se mantiene corta (1.5 m) para
+                    // que la luz no banhe el resto de la sala.
+                    float ambient = 31.5f + 3.60f * sinf(t * 1.5f + i);
+                    float power = ambient + glow * 76.5f;
                     gLights[5 + i].Position = SimonButtonPos(i) + lightOffset;
                     gLights[5 + i].Color = SIMON_COLORS[i];
                     gLights[5 + i].Power = glm::vec4(power);
@@ -4437,24 +4437,23 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
         float pulse = 0.55f + 0.20f * sinf(t * 2.4f + i * 1.3f);
         glm::vec4 base = SIMON_COLORS[i];
 
-        // Color BRILLO CONSTANTE x3: ambient y diffuse triplicados
-        // respecto al anterior. Confiamos en el tone mapping ACES para
-        // que los picos no se quemen a blanco puro y conserven el matiz
-        // del color. Al pulsar / sonar en el patron el glow boost
-        // tambien va x3, dejando un destello muy notorio.
-        glm::vec4 diff = base * (4.80f + pulse * 0.60f + glow * 5.40f);
+        // Color BRILLO CONSTANTE x9 acumulado (x3 sobre x3 anterior):
+        // ambient y diffuse triplicados otra vez. Confiamos en el tone
+        // mapping ACES para que los picos no se quemen a blanco puro y
+        // conserven el matiz del color. Al pulsar / sonar en el patron
+        // el glow boost tambien va x3, dejando un destello muy notorio.
+        glm::vec4 diff = base * (14.40f + pulse * 1.80f + glow * 16.20f);
         diff.a = 1.0f;
-        glm::vec4 amb  = base * (3.60f + 0.30f * pulse + glow * 2.70f);
+        glm::vec4 amb  = base * (10.80f + 0.90f * pulse + glow * 8.10f);
         amb.a = 1.0f;
         glm::vec4 spec(0.95f, 0.95f, 0.95f, 1.0f);
         SetMaterial(phongShader, amb, diff, spec, 32);
         phongShader->setFloat("transparency", 1.0f);
 
-        // Cubo de tapa: 5.6 cm de arista (0.8x del anterior 7 cm) para
-        // que se sienta encima del boton fisico (6 cm) sin desbordarlo.
-        // En reposo respira sutilmente con el pulso; al iluminarse
-        // crece 4 mm para sentirse "pulsado".
-        float size = 0.056f + 0.003f * pulse + glow * 0.004f;
+        // Cubo de tapa: 4.5 cm de arista (0.8x del anterior 5.6 cm).
+        // Sigue colocado sobre el boton fisico (6 cm) pero ya queda
+        // mas como una "luz incrustada" que como una tapa.
+        float size = 0.045f + 0.0024f * pulse + glow * 0.0032f;
         // Empujamos el cubo 3.5 cm hacia el jugador (-X) para que la
         // cara trasera del cubo quede pegada a la cara visible del
         // boton fisico (x = 5.076). Asi el cubo coincide en tamano y
