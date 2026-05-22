@@ -1111,9 +1111,23 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone) {
 
     // Muebles/props: circulo (jugador) vs AABB en XZ. Si la base de la caja
     // queda por encima de la cabeza (~1.8 m) el jugador puede pasar por debajo.
+    // Tambien se ignora cualquier caja que tape el hueco de una puerta de la
+    // zona actual (los muros vienen partidos en pedazos alrededor del marco).
     const float PLAYER_HEIGHT = 1.8f;
+    const float DOOR_PAD = 0.3f;
     for (const AABB& b : autoColliders[zone]) {
         if (b.min.y > PLAYER_HEIGHT) continue;
+
+        bool overlapsDoor = false;
+        for (int i = 0; i < 8; ++i) {
+            const ZoneDoor& d = zoneDoors[i];
+            if (d.fromZone != zone) continue;
+            float dx = std::max(b.min.x - DOOR_PAD, std::min(d.center.x, b.max.x + DOOR_PAD)) - d.center.x;
+            float dz = std::max(b.min.z - DOOR_PAD, std::min(d.center.z, b.max.z + DOOR_PAD)) - d.center.z;
+            if (dx * dx + dz * dz < d.radius * d.radius) { overlapsDoor = true; break; }
+        }
+        if (overlapsDoor) continue;
+
         float cx = std::max(b.min.x, std::min(pos.x, b.max.x));
         float cz = std::max(b.min.z, std::min(pos.z, b.max.z));
         float dx = pos.x - cx;
