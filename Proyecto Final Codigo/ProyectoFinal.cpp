@@ -667,10 +667,10 @@ const float ESPECTRO_NM[4] = { 656.3f, 486.1f, 434.0f, 410.2f };
 // Macetas reales del .obj del invernadero (filas F1 y F2, maceteros 2/3).
 // Notas del OSU scrollean horizontalmente desde el muro hacia la maceta.
 const glm::vec3 INV_PLANT_POSITIONS[4] = {
-    glm::vec3(-2.189f, 0.0f, -12.863f), // 0 = F1_2 (izq, maceta 2)
-    glm::vec3(-2.189f, 0.0f, -15.363f), // 1 = F1_3 (izq, maceta 3)
-    glm::vec3( 2.200f, 0.0f, -12.850f), // 2 = F2_2 (der, maceta 2)
-    glm::vec3( 2.200f, 0.0f, -15.350f)  // 3 = F2_3 (der, maceta 3)
+    glm::vec3(-2.189f, -1.0f, -13.6f), // 0 = F1_2 (izq, maceta 2)
+    glm::vec3(-2.189f, -1.0f, -15.85f), // 1 = F1_3 (izq, maceta 3)
+    glm::vec3( 2.200f, -1.0f, -13.6f), // 2 = F2_2 (der, maceta 2)
+    glm::vec3( 2.200f, -1.0f, -15.85f)  // 3 = F2_3 (der, maceta 3)
 };
 // FACIL usa los carriles 0 y 1 directamente (F1_2 y F1_3), asi se queda
 // pegado a la misma fila de macetas reales sin necesidad de un arreglo
@@ -1176,7 +1176,7 @@ void ChangeZone(int z) {
         break;
     case 1:
         PushNarrative("INVERNADERO: aqui crecen los cultivos de la estacion.");
-        PushNarrative("1) Plantar: pulsa P para crecer el helecho fractal.");
+        PushNarrative("1) Plantar: pulsa P para crecer el helecho.");
         PushNarrative("2) Regar: pulsa B y atina al ritmo con H J K L.");
         PushNarrative("3) Cometa: pulsa V para iniciar la espectrografia.");
         break;
@@ -1189,8 +1189,8 @@ void ChangeZone(int z) {
         PushNarrative("Tarea: pulsa los botones de las pilas en el orden indicado. Pulsa B para empezar.");
         break;
     case 4:
-        PushNarrative("CAPSULAS: las criocamaras de la tripulacion duermen en silencio.");
-        PushNarrative("Pasea con libertad y vuelve al HUB cuando quieras.");
+        PushNarrative("CAPSULAS: Lugar donde la tripulacion duerme.");
+        PushNarrative("Tarea: Haz una hamburguesa. Pulsa B para empezar.");
         break;
     }
 }
@@ -1430,8 +1430,8 @@ glm::mat4 ComputeView() {
         // Cam top-down sobre las macetas. center/eye.z = -12.1 (acumulado
         // +2 m en +Z para subir el contenido 2 m en pantalla). eye.y = 9
         // (camara 1 m mas cerca del suelo para acercar la vista).
-        glm::vec3 center(0.0f, 0.0f, -12.10f);
-        glm::vec3 eye(0.0f, 9.0f, -12.09f);
+        glm::vec3 center(0.0f, 0.0f, -14.10f);
+        glm::vec3 eye(0.0f, 8.5f, -14.09f);
         return glm::lookAt(eye, center, glm::vec3(0.0f, 0.0f, -1.0f));
     }
     if (currentZone == 1 && gEspectro.active && gMinigameCamLocked) {
