@@ -3983,6 +3983,7 @@ void UpdateInvernaderoGame(float dt) {
         if (!gStats.plantsWatered && gInvernadero.hits >= needed) {
             gStats.plantsWatered = true;
             PushNarrative("Plantas regadas. Ya puedes preparar comida en CAPSULAS.");
+            StopActiveMinigames();
         }
     }
 }
@@ -4211,6 +4212,7 @@ void EnergiaPress(int button) {
                 gStats.simonDone = true;
                 gStats.energia   = 1.0f;
                 PushNarrative("Reactor estable. Energia de la base al 100%.");
+                StopActiveMinigames();
             }
         } else {
             PushNarrative("Vas bien, sigue la secuencia.");
@@ -4632,6 +4634,7 @@ void HamburguesaPress(int ingredient) {
             std::cout << "[Hamburguesa] COMPLETA. Score=" << gHamburguesa.score
                       << "  MaxCombo=" << gHamburguesa.maxCombo
                       << "  Misses=" << gHamburguesa.misses << std::endl;
+            StopActiveMinigames();
         } else {
             char buf[120];
             snprintf(buf, sizeof(buf),
@@ -5048,6 +5051,7 @@ static void EspectroStopBar() {
         if (!gStats.cometDone && gEspectro.hits > gEspectro.misses) {
             gStats.cometDone = true;
             PushNarrative("Cometa catalogado. Tarea cientifica registrada.");
+            StopActiveMinigames();
         }
     }
 }
