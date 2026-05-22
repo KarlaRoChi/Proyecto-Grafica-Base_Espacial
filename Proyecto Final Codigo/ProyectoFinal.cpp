@@ -1109,6 +1109,18 @@ bool CheckCollision(glm::vec3 pos, float radius, int zone) {
     if (pos.z - radius < r.boundsMin.y) return true;
     if (pos.z + radius > r.boundsMax.y) return true;
 
+    // Muebles/props: circulo (jugador) vs AABB en XZ. Si la base de la caja
+    // queda por encima de la cabeza (~1.8 m) el jugador puede pasar por debajo.
+    const float PLAYER_HEIGHT = 1.8f;
+    for (const AABB& b : autoColliders[zone]) {
+        if (b.min.y > PLAYER_HEIGHT) continue;
+        float cx = std::max(b.min.x, std::min(pos.x, b.max.x));
+        float cz = std::max(b.min.z, std::min(pos.z, b.max.z));
+        float dx = pos.x - cx;
+        float dz = pos.z - cz;
+        if (dx * dx + dz * dz < radius * radius) return true;
+    }
+
     return false;
 }
 
