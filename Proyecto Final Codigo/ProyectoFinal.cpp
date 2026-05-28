@@ -87,7 +87,10 @@ void DrawEnergiaHUD();
 void EnergiaPress(int button);
 
 void InitReciclajeGame();
+void UpdateReciclajeGame(float dt);
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view);
+void DrawReciclajeHUD();
+void ReciclajePress(int color);
 
 // Hamburguesa (zona CAPSULAS): armado por capas con teclas T Y U I O P.
 void InitHamburguesaGame();
@@ -523,21 +526,32 @@ struct SimonGame {
 };
 
 // --- Reciclaje ---
-enum MaterialType { MAT_METAL = 0, MAT_VIDRIO = 1, MAT_CARTON = 2 };
-struct RecycleItem {
-    glm::vec3 position;
-    MaterialType type;
-    bool sorted = false;
-};
+// Minijuego: el jugador apila cajas de reciclaje (modelo CAJA_INTERACTIVA)
+// siguiendo la secuencia objetivo que aparece en el HUD. Cada tecla apila
+// una caja de un color (Z=METAL, X=VIDRIO, C=CARTON). Acertar el color que
+// toca apila la caja sobre la torre y suma combo; fallar rompe la racha
+// pero la torre conserva las capas ya correctas.
+enum MaterialType { MAT_METAL = 0, MAT_VIDRIO = 1, MAT_CARTON = 2, MAT_COUNT = 3 };
 
 struct ReciclajeGame {
     Difficulty difficulty = DIFF_EASY;
-    bool active = false;
-    std::vector<RecycleItem> items;
-    int selectedItem = -1;     // item bajo selección (uso futuro)
-    int selectedBin = -1;      // bote bajo selección (uso futuro)
-    int score = 0;
-    int selectedBox = 0;       // 0..4 caja interactiva activa para mover en X/Y/Z
+    bool active           = false;
+    std::vector<int> sequence;          // colores objetivo (0..2)
+    int  step             = 0;          // proximo indice por colocar
+    int  score            = 0;
+    int  hits             = 0;
+    int  misses           = 0;
+    int  combo            = 0;
+    int  maxCombo         = 0;
+    int  bestStep         = 0;          // mejor torre en la partida actual
+    float layerAnim       = 0.0f;       // animacion de drop de la ultima caja
+    float feedbackTimer   = 0.0f;       // flash rojo tras error
+    bool  lastWrong       = false;
+    int   lastWrongColor  = -1;
+    float timeLimit       = 0.0f;       // 0 = sin reloj
+    float timeLeft        = 0.0f;
+    bool  finished        = false;      // torre completa o tiempo agotado
+    bool  failedByTime    = false;
 };
 
 // ============ Espectrografia (segundo minijuego del invernadero) ============
@@ -746,6 +760,31 @@ const glm::vec3 RECYCLE_BIN_POSITIONS[3] = {
     glm::vec3(11.5f, 0.5f, -2.5f),  // METAL
     glm::vec3(11.5f, 0.5f,  0.0f),  // VIDRIO
     glm::vec3(11.5f, 0.5f,  2.5f)   // CARTON
+};
+
+// ============ Configuracion del minijuego de RECICLAJE ============
+// Base de la torre dentro de la zona reciclaje (X 6..12.5, Z -3.5..3.5).
+// La torre se ubica en el centro de la sala, hacia la pared este, para
+// que el jugador la vea de frente al entrar desde el HUB.
+const glm::vec3 RECICLAJE_TOWER_BASE  = glm::vec3(9.5f, 0.30f, 0.0f);
+const float     RECICLAJE_LAYER_H     = 0.34f;   // altura por capa (m)
+const float     RECICLAJE_BOX_SCALE   = 0.18f;   // escala visual de cada caja
+
+// Tres "montones" decorativos junto a la torre, uno por color.
+const glm::vec3 RECICLAJE_STAGING[3] = {
+    glm::vec3(11.0f, 0.18f, -2.4f),  // METAL
+    glm::vec3(11.0f, 0.18f,  0.0f),  // VIDRIO
+    glm::vec3(11.0f, 0.18f,  2.4f)   // CARTON
+};
+
+const char* RECICLAJE_NAMES[3]    = { "METAL", "VIDRIO", "CARTON" };
+const char* RECICLAJE_KEY_HINT[3] = { "Z", "X", "C" };
+const int   RECICLAJE_KEYS[3]     = { GLFW_KEY_Z, GLFW_KEY_X, GLFW_KEY_C };
+// Color por tipo (chip del HUD + tinte de la caja en 3D).
+const glm::vec4 RECICLAJE_COLORS[3] = {
+    glm::vec4(0.32f, 0.55f, 0.95f, 1.0f), // METAL  - azul
+    glm::vec4(0.30f, 0.85f, 0.55f, 1.0f), // VIDRIO - verde
+    glm::vec4(0.78f, 0.55f, 0.30f, 1.0f)  // CARTON - cafe
 };
 
 bool keyZLast = false, keyXLast = false, keyCLast = false, keyVLast = false;
@@ -1000,11 +1039,6 @@ void InitRooms() {
 
     for (int i = 0; i < 5; ++i) rooms[i].freeCamPos = glm::vec3(0.0f, 5.0f, 12.0f);
 
-    // El minijuego de reciclaje esta deshabilitado temporalmente. Marcamos
-    // la tarea como completa de entrada para que la barra TAREAS pueda
-    // llegar al 100% solo con el espectro del cometa.
-    gStats.recycleDone = true;
-
     // Ubicaciones iniciales de las cajas
     for (int i = 0; i < 5; ++i) {
         interactiveBoxes[i].startPos = glm::vec3(6.5f + (i * 0.5f), 0.1f, (i % 2 == 0) ? -1.5f : 1.5f);
@@ -1147,6 +1181,7 @@ static void StopActiveMinigames() {
     gInvernadero.topDown = false;
     gEspectro.active    = false;
     gEnergia.active     = false;
+    gReciclaje.active   = false;
     gHamburguesa.active = false;
     gMinigameCamLocked  = false;
 }
@@ -1207,8 +1242,8 @@ void ChangeZone(int z) {
         PushNarrative("3) Cometa: pulsa V para iniciar la espectrografia.");
         break;
     case 2:
-        PushNarrative("RECICLAJE: zona de almacen. El modulo de clasificacion esta en mantenimiento.");
-        PushNarrative("Puedes recorrer la sala con libertad y volver al HUB por la puerta luminosa.");
+        PushNarrative("RECICLAJE: el compactador necesita una torre de cajas bien clasificadas.");
+        PushNarrative("Tarea: pulsa B para iniciar. Z=METAL  X=VIDRIO  C=CARTON segun la secuencia objetivo.");
         break;
     case 3:
         PushNarrative("ENERGIA: el reactor necesita un patron de encendido.");
@@ -1703,6 +1738,7 @@ bool Update() {
     if (menuState == MENU_NONE) {
         if (currentZone == 1 && gInvernadero.active) UpdateInvernaderoGame(deltaTime);
         if (currentZone == 1 && gEspectro.active)    UpdateEspectroGame(deltaTime);
+        if (currentZone == 2 && gReciclaje.active)   UpdateReciclajeGame(deltaTime);
         if (currentZone == 3 && gEnergia.active)     UpdateEnergiaGame(deltaTime);
         if (currentZone == 4 && gHamburguesa.active) UpdateHamburguesaGame(deltaTime);
     }
@@ -2126,11 +2162,11 @@ bool Update() {
         SetMaterial(phongShader, ambMetal, diffMetal, specMetal, alphaMetal);
         if (RECICLAJE_METAL) RECICLAJE_METAL->Draw(*phongShader);
 
-        // ====== CAJAS INTERACTIVAS Y MINIJUEGO RECICLAJE: DESHABILITADOS ======
-        // El usuario pidio retirar temporalmente las 5 cajas que se mueven y
-        // el minijuego de clasificar desechos. Conservamos la sala (modelo
-        // RECICLAJE_OPACO/METAL) y las estructuras de datos por si se quiere
-        // reactivar mas adelante; solo se omiten el dibujo y los controles.
+        // ====== MINIJUEGO COMPACTADOR DE RECICLAJE ======
+        // La torre se dibuja cuando el minijuego esta activo, pausado con
+        // progreso parcial, o ya completado (queda como prueba de la tarea).
+        if (gReciclaje.active || gStats.recycleDone || gReciclaje.step > 0)
+            DrawReciclajeGame(projection, view);
 
         // Puerta de retorno al HUB (zoneDoors[5], borde oeste del modulo)
         DrawZoneDoor(5, zoneDoors[5], RETURN_DOOR_YAW[1]);
@@ -2629,8 +2665,10 @@ static std::vector<std::string> BuildHelpLines() {
         if (d <= DIFF_EASY)   out.push_back("Solo se usan 2 macetas en FACIL; MEDIO y EXPERTO usan las 4");
         break;
     case 2: // RECICLAJE
-        out.push_back("Zona libre: el minijuego de clasificacion esta desactivado de momento");
-        if (d <= DIFF_EASY) out.push_back("Puedes recorrer la sala y volver al HUB por la puerta luminosa");
+        out.push_back("B = iniciar compactador  |  Z=METAL  X=VIDRIO  C=CARTON segun la secuencia");
+        if (d <= DIFF_MEDIUM) out.push_back("R reinicia la torre  |  TAB interrumpe el minijuego");
+        if (d <= DIFF_EASY)   out.push_back("Sigue los chips de color del HUD en orden de izquierda a derecha");
+        if (d <= DIFF_EASY)   out.push_back("FACIL = 5 cajas, sin reloj; MEDIO/EXPERTO = 8/12 cajas con tiempo");
         break;
     case 3: // ENERGIA
         out.push_back("B = iniciar Simon (la camara se fija a la pila)  |  Clic en la membrana o Z X C V (N M en MEDIO/EXPERTO)");
@@ -2663,7 +2701,7 @@ static std::vector<std::string> BuildCompactHelpLines() {
     switch (currentZone) {
         case 0: zoneHint = "HUB: camina a una puerta luminosa para entrar a un modulo";        break;
         case 1: zoneHint = "INVERNADERO: B = regar plantas  |  V = espectro del cometa  |  P = plantar (fractal)  |  R = reiniciar";       break;
-        case 2: zoneHint = "RECICLAJE: zona libre (minijuego en pausa)";                       break;
+        case 2: zoneHint = "RECICLAJE: B = compactador  |  Z X C apilan cajas  |  R = reiniciar";  break;
         case 3: zoneHint = "ENERGIA: B inicia Simon  |  Z X C V (N M)  |  R = reiniciar";       break;
         case 4: zoneHint = "CAPSULAS: B = armar hamburguesa  |  T Y U I O P apilan capas  |  R = reiniciar";  break;
     }
@@ -2941,7 +2979,7 @@ void DrawQuestsWidget() {
         { "Plantar planta",      gStats.plantPlanted  },
         { "Regar plantas",       gStats.plantsWatered },
         { "Catalogar cometa",    gStats.cometDone     },
-        { "Visitar almacen",     gStats.recycleDone   },
+        { "Compactar cajas",     gStats.recycleDone   },
         { "Estabilizar reactor", gStats.simonDone     },
         { "Armar hamburguesa",   gStats.foodPrepared  },
     };
@@ -3087,7 +3125,7 @@ void DrawQuestsMenu() {
         { "Plantar la planta (Invernadero)",         "Crece el helecho fractal con P (3 iteraciones)", gStats.plantPlanted },
         { "Regar las plantas (Invernadero)",         "Ritmo OSU: H J K L con B",       gStats.plantsWatered },
         { "Catalogar el cometa (Invernadero)",       "Espectro: V para iniciar, SPACE", gStats.cometDone },
-        { "Recorrer almacen de reciclaje",           "Modulo en mantenimiento",        gStats.recycleDone },
+        { "Compactar cajas de reciclaje",            "Apila la torre con Z X C en orden", gStats.recycleDone },
         { "Estabilizar el reactor (Energia)",        "Simon nivel 3 (clic o Z X C V)", gStats.simonDone },
         { "Armar la hamburguesa (Capsulas)",         "B + receta T Y U I O P en orden", gStats.foodPrepared },
     };
@@ -3155,6 +3193,7 @@ void DrawHud() {
     DrawNarrativePanel();
     if (gEspectro.active) DrawEspectroHUD();
     if (gEnergia.active)  DrawEnergiaHUD();
+    if (gReciclaje.active) DrawReciclajeHUD();
     if (gHamburguesa.active) DrawHamburguesaHUD();
 }
 
@@ -3537,17 +3576,56 @@ void processInput(GLFWwindow* window) {
         keyOLast = false;
     }
 
-    // ZONA 2: RECICLAJE
-    // - Seleccion de caja activa con TAB (cicla 0..4) o teclas 5..9 directas
-    // - Caja seleccionada se mueve en X/Y/Z con IJKL y UM
-    // - Rotacion con O/L (mientras esten libres no choquen con el OSU de invernadero)
-    // - Reset con R
-    // La logica de separar items (metal/vidrio/carton) se deja COMENTADA y lista.
-    // ZONA 2: RECICLAJE - minijuego y cajas interactivas DESHABILITADOS.
-    // El usuario pidio retirar la mecanica de mover cajas y la clasificacion
-    // de desechos, asi que la sala queda como zona libre, sin controles
-    // propios. gStats.recycleDone se inicializa en true (ver InitRooms) para
-    // que la barra TAREAS pueda llegar al 100% solo con el espectro.
+    // ZONA 2: RECICLAJE - Minijuego "Compactador" (apilar cajas por color).
+    // B inicia/reinicia la partida, R reinicia, TAB interrumpe. Las teclas
+    // Z X C apilan una caja del color correspondiente cuando coincide con
+    // el siguiente paso de la secuencia objetivo. La camara queda libre
+    // para que el jugador pueda ver la torre en 3D mientras juega.
+    if (currentZone == 2) {
+        static bool keyBRecLast = false;
+        bool bRec = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+        if (bRec && !keyBRecLast) {
+            StopActiveMinigames();
+            InitReciclajeGame();
+            gReciclaje.active = true;
+            PushNarrative("COMPACTADOR: apila las cajas segun la secuencia. Z=METAL X=VIDRIO C=CARTON.");
+            std::cout << "[Reciclaje] Nueva partida (dificultad "
+                      << gReciclaje.difficulty << ")" << std::endl;
+        }
+        keyBRecLast = bRec;
+
+        if (gReciclaje.active) {
+            // Teclas de color (Z X C). Cada una manda ReciclajePress con
+            // el indice del material correspondiente.
+            static bool keyLastRec[3] = { false, false, false };
+            for (int i = 0; i < 3; ++i) {
+                bool now = glfwGetKey(window, RECICLAJE_KEYS[i]) == GLFW_PRESS;
+                if (now && !keyLastRec[i]) ReciclajePress(i);
+                keyLastRec[i] = now;
+            }
+
+            // R = reiniciar la torre (vuelve al paso 0 manteniendo dificultad).
+            static bool keyR_RecLast = false;
+            bool rRec = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+            if (rRec && !keyR_RecLast) {
+                InitReciclajeGame();
+                gReciclaje.active = true;
+                PushNarrative("Compactador reiniciado. Vuelve a apilar.");
+                std::cout << "[Reciclaje] RESET" << std::endl;
+            }
+            keyR_RecLast = rRec;
+
+            // TAB interrumpe el minijuego. El progreso queda visible
+            // sobre la torre, asi el jugador puede continuar luego con B.
+            static bool tabIntRec = false;
+            bool tabInt = glfwGetKey(window, GLFW_KEY_TAB) == GLFW_PRESS;
+            if (tabInt && !tabIntRec) {
+                gReciclaje.active = false;
+                PushNarrative("Minijuego de reciclaje interrumpido.");
+            }
+            tabIntRec = tabInt;
+        }
+    }
 
     // ZONA 3: ENERGIA - Minijuego Simon (memoria con botones de bateria)
     if (currentZone == 3) {
@@ -4474,33 +4552,150 @@ void DrawEnergiaGame(const glm::mat4& projection, const glm::mat4& view) {
 }
 
 // ============ RECICLAJE ============
+// Minijuego "Compactador": el jugador apila cajas (modelo CAJA_INTERACTIVA)
+// siguiendo la secuencia objetivo que aparece en el HUD. Cada acierto suma
+// score + combo y apila visualmente la caja sobre la torre con una pequena
+// animacion de caida. MEDIO/EXPERTO anaden reloj. Al completar la torre la
+// tarea recycleDone se marca y la energia/oxigeno se recargan parcialmente.
 
 void InitReciclajeGame() {
-    gReciclaje.items.clear();
-    gReciclaje.score = 0;
-    gReciclaje.selectedItem = -1;
-    gReciclaje.selectedBin = -1;
+    gReciclaje.sequence.clear();
+    gReciclaje.step          = 0;
+    gReciclaje.score         = 0;
+    gReciclaje.hits          = 0;
+    gReciclaje.misses        = 0;
+    gReciclaje.combo         = 0;
+    gReciclaje.maxCombo      = 0;
+    gReciclaje.bestStep      = 0;
+    gReciclaje.layerAnim     = 0.0f;
+    gReciclaje.feedbackTimer = 0.0f;
+    gReciclaje.lastWrong     = false;
+    gReciclaje.lastWrongColor = -1;
+    gReciclaje.finished      = false;
+    gReciclaje.failedByTime  = false;
 
     int total;
     switch (gReciclaje.difficulty) {
-    case DIFF_EASY:   total = 6;  break;
-    case DIFF_MEDIUM: total = 9;  break;
-    case DIFF_EXPERT: total = 12; break;
-    default:          total = 6;  break;
+    case DIFF_EASY:   total = 5;  gReciclaje.timeLimit = 0.0f;  break;
+    case DIFF_MEDIUM: total = 8;  gReciclaje.timeLimit = 25.0f; break;
+    case DIFF_EXPERT: total = 12; gReciclaje.timeLimit = 25.0f; break;
+    default:          total = 5;  gReciclaje.timeLimit = 0.0f;  break;
     }
+    gReciclaje.timeLeft = gReciclaje.timeLimit;
 
-    srand(54321);
-    for (int i = 0; i < total; i++) {
-        RecycleItem it;
-        // Posiciones dispersas en el piso de reciclaje (X 7..10, Z -3..3)
-        float fx = 7.5f + (rand() % 100) / 100.0f * 2.5f;
-        float fz = -3.0f + (rand() % 100) / 100.0f * 6.0f;
-        it.position = glm::vec3(fx, 0.3f, fz);
-        it.type = (MaterialType)(rand() % 3);
-        it.sorted = false;
-        gReciclaje.items.push_back(it);
+    // Secuencia pseudoaleatoria pero estable entre partidas de la misma
+    // dificultad: usamos un seed fijo + dificultad para que el jugador
+    // pueda aprender y memorizar el patron ronda tras ronda. Evitamos
+    // generar 3 repeticiones seguidas para que no sea aburrido.
+    srand(12345 + (int)gReciclaje.difficulty * 7);
+    int prev = -1, prev2 = -1;
+    for (int i = 0; i < total; ++i) {
+        int c = rand() % MAT_COUNT;
+        if (c == prev && c == prev2) c = (c + 1) % MAT_COUNT;
+        gReciclaje.sequence.push_back(c);
+        prev2 = prev;
+        prev  = c;
     }
-    std::cout << "[Reciclaje] " << total << " items generados" << std::endl;
+    std::cout << "[Reciclaje] Nueva torre de " << total << " cajas (dif "
+              << gReciclaje.difficulty << ")" << std::endl;
+}
+
+void ReciclajePress(int color) {
+    if (!gReciclaje.active) return;
+    if (gReciclaje.finished) return;
+    if (color < 0 || color >= MAT_COUNT) return;
+    if (gReciclaje.step >= (int)gReciclaje.sequence.size()) return;
+
+    int expected = gReciclaje.sequence[gReciclaje.step];
+    if (color == expected) {
+        gReciclaje.step++;
+        gReciclaje.hits++;
+        gReciclaje.combo++;
+        if (gReciclaje.combo > gReciclaje.maxCombo)
+            gReciclaje.maxCombo = gReciclaje.combo;
+        if (gReciclaje.step > gReciclaje.bestStep)
+            gReciclaje.bestStep = gReciclaje.step;
+        gReciclaje.score += 100 + gReciclaje.combo * 10;
+        gReciclaje.layerAnim = 1.0f;
+        gReciclaje.lastWrong = false;
+        std::cout << "[Reciclaje] OK " << RECICLAJE_NAMES[color]
+                  << "  (" << gReciclaje.step << "/" << gReciclaje.sequence.size() << ")"
+                  << "  combo=" << gReciclaje.combo << std::endl;
+
+        if (gReciclaje.step >= (int)gReciclaje.sequence.size()) {
+            // Torre completa: tarea cumplida + bono a las barras de
+            // energia y oxigeno (la sala recicla materiales y libera
+            // soporte vital). No tocamos agua/comida (esas son del
+            // invernadero y la mesa de practicas).
+            gReciclaje.finished = true;
+            if (!gStats.recycleDone) {
+                gStats.recycleDone = true;
+                gStats.energia = std::min(1.0f, gStats.energia + 0.30f);
+                gStats.oxigeno = std::min(1.0f, gStats.oxigeno + 0.20f);
+            }
+            char buf[140];
+            snprintf(buf, sizeof(buf),
+                     "Torre completa! Score %d, racha %d. Reciclaje al 100%%.",
+                     gReciclaje.score, gReciclaje.maxCombo);
+            PushNarrative(buf);
+            std::cout << "[Reciclaje] COMPLETA. Score=" << gReciclaje.score
+                      << "  MaxCombo=" << gReciclaje.maxCombo
+                      << "  Misses=" << gReciclaje.misses << std::endl;
+            StopActiveMinigames();
+        } else {
+            int next = gReciclaje.sequence[gReciclaje.step];
+            char buf[120];
+            snprintf(buf, sizeof(buf),
+                     "Bien! Siguiente caja: %s (tecla %s).",
+                     RECICLAJE_NAMES[next], RECICLAJE_KEY_HINT[next]);
+            PushNarrative(buf);
+        }
+    } else {
+        gReciclaje.misses++;
+        gReciclaje.combo = 0;
+        gReciclaje.lastWrong = true;
+        gReciclaje.lastWrongColor = color;
+        gReciclaje.feedbackTimer = 0.6f;
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "Caja incorrecta: %s. Esperaba %s (tecla %s).",
+                 RECICLAJE_NAMES[color],
+                 RECICLAJE_NAMES[expected], RECICLAJE_KEY_HINT[expected]);
+        PushNarrative(buf);
+        std::cout << "[Reciclaje] FALLO " << RECICLAJE_NAMES[color]
+                  << " (esperaba " << RECICLAJE_NAMES[expected] << ")."
+                  << "  Misses=" << gReciclaje.misses << std::endl;
+    }
+}
+
+void UpdateReciclajeGame(float dt) {
+    if (!gReciclaje.active) return;
+    // Animacion del drop de la ultima caja (de 1.0 a 0.0).
+    if (gReciclaje.layerAnim > 0.0f) {
+        gReciclaje.layerAnim -= dt * 2.8f;
+        if (gReciclaje.layerAnim < 0.0f) gReciclaje.layerAnim = 0.0f;
+    }
+    if (gReciclaje.feedbackTimer > 0.0f) {
+        gReciclaje.feedbackTimer -= dt;
+        if (gReciclaje.feedbackTimer <= 0.0f) {
+            gReciclaje.feedbackTimer = 0.0f;
+            gReciclaje.lastWrong = false;
+        }
+    }
+    // Reloj (solo MEDIO/EXPERTO). Si se agota antes de terminar la torre,
+    // la partida se cuenta como fallida; el progreso queda visible para
+    // que el jugador pueda reintentar con R.
+    if (!gReciclaje.finished && gReciclaje.timeLimit > 0.0f) {
+        gReciclaje.timeLeft -= dt;
+        if (gReciclaje.timeLeft <= 0.0f) {
+            gReciclaje.timeLeft = 0.0f;
+            gReciclaje.failedByTime = true;
+            gReciclaje.finished = true;
+            PushNarrative("Se acabo el tiempo. Pulsa B para reintentar.");
+            std::cout << "[Reciclaje] TIMEOUT. Capas colocadas="
+                      << gReciclaje.step << std::endl;
+        }
+    }
 }
 
 void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
@@ -4509,55 +4704,216 @@ void DrawReciclajeGame(const glm::mat4& projection, const glm::mat4& view) {
     phongShader->setMat4("projection", projection);
     phongShader->setMat4("view", view);
 
-    glm::vec4 matColors[3] = {
-        glm::vec4(0.6f, 0.6f, 0.7f, 1.0f),  // metal: gris azulado
-        glm::vec4(0.3f, 0.8f, 0.85f,1.0f),  // vidrio: turquesa
-        glm::vec4(0.75f,0.55f,0.30f,1.0f)   // carton: ocre
-    };
-
-    // Items en el piso: cubos de colores por tipo de material. Usamos
-    // CUBO_MODELO porque queremos un cubo geometrico simple (no tinta del FBX).
-    Model* itemModel = CUBO_MODELO ? CUBO_MODELO : CAJA_MODELO;
-    for (auto& it : gReciclaje.items) {
-        if (it.sorted) continue;
-        glm::vec4 c = matColors[(int)it.type];
-        SetMaterial(phongShader, c * 0.3f, c, glm::vec4(0.4f), 32);
-
+    // (1) Plataforma base de la torre. Un cubo muy plano teniido oscuro
+    // para que la torre se vea apoyada en algo visible.
+    Model* baseModel = CUBO_MODELO ? CUBO_MODELO : CAJA_MODELO;
+    if (baseModel) {
+        SetMaterial(phongShader,
+                    glm::vec4(0.10f, 0.10f, 0.12f, 1.0f),
+                    glm::vec4(0.20f, 0.22f, 0.26f, 1.0f),
+                    glm::vec4(0.30f, 0.30f, 0.35f, 1.0f), 16);
         glm::mat4 m(1.0f);
-        m = glm::translate(m, it.position);
+        m = glm::translate(m, RECICLAJE_TOWER_BASE - glm::vec3(0.0f, 0.18f, 0.0f));
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.28f));
+        m = glm::scale(m, glm::vec3(0.45f, 0.45f, 0.08f));
         phongShader->setMat4("model", m);
-        itemModel->Draw(*phongShader);
+        baseModel->Draw(*phongShader);
     }
 
-    // Botes (3): metal, vidrio, carton
-    for (int b = 0; b < 3; b++) {
-        glm::vec4 c = matColors[b] * 1.2f;
-        SetMaterial(phongShader, c * 0.35f, c, glm::vec4(0.5f), 32);
-
-        glm::mat4 m(1.0f);
-        m = glm::translate(m, RECYCLE_BIN_POSITIONS[b]);
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.8f, 0.8f, 1.4f));
-        phongShader->setMat4("model", m);
-        CAJA_MODELO->Draw(*phongShader);
+    // (2) Montones decorativos en la zona de "staging": un par de cajas
+    // por color que sugieren el inventario disponible a los costados.
+    for (int b = 0; b < 3; ++b) {
+        glm::vec4 c = RECICLAJE_COLORS[b];
+        SetMaterial(phongShader, c * 0.35f, c * 0.95f, glm::vec4(0.4f), 24);
+        for (int k = 0; k < 2; ++k) {
+            glm::vec3 p = RECICLAJE_STAGING[b] + glm::vec3(0.0f, k * 0.30f, k * 0.08f);
+            glm::mat4 m(1.0f);
+            m = glm::translate(m, p);
+            m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::scale(m, glm::vec3(RECICLAJE_BOX_SCALE));
+            phongShader->setMat4("model", m);
+            CAJA_MODELO->Draw(*phongShader);
+        }
     }
 
-    // Marcador visual sobre la caja interactiva seleccionada
-    if (gReciclaje.selectedBox >= 0 && gReciclaje.selectedBox < 5) {
-        glm::vec4 c(1.0f, 1.0f, 0.2f, 1.0f);
-        SetMaterial(phongShader, c * 0.4f, c, glm::vec4(0.8f), 32);
+    // (3) Cajas apiladas (i < step). La ultima recibe un pequeno drop
+    // animado proporcional a layerAnim.
+    int placed = gReciclaje.step;
+    int total  = (int)gReciclaje.sequence.size();
+    for (int i = 0; i < placed && i < total; ++i) {
+        int colorIdx = gReciclaje.sequence[i];
+        glm::vec4 base = RECICLAJE_COLORS[colorIdx];
+        glm::vec4 amb  = base * 0.40f; amb.a = 1.0f;
+        glm::vec4 diff = base * 1.00f; diff.a = 1.0f;
+        SetMaterial(phongShader, amb, diff, glm::vec4(0.55f), 24);
+
+        float drop = (i == placed - 1) ? gReciclaje.layerAnim * 0.25f : 0.0f;
+        glm::vec3 p = RECICLAJE_TOWER_BASE +
+                      glm::vec3(0.0f, i * RECICLAJE_LAYER_H + drop, 0.0f);
         glm::mat4 m(1.0f);
-        glm::vec3 p = interactiveBoxes[gReciclaje.selectedBox].position;
-        p.y += 1.6f * interactiveBoxes[gReciclaje.selectedBox].scale;
-        float pulse = 0.85f + 0.15f * sinf((float)glfwGetTime() * 6.0f);
         m = glm::translate(m, p);
         m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.18f * pulse));
+        m = glm::scale(m, glm::vec3(RECICLAJE_BOX_SCALE));
         phongShader->setMat4("model", m);
         CAJA_MODELO->Draw(*phongShader);
     }
+
+    // (4) Marcador pulsante sobre la siguiente posicion de la torre, con
+    // el color de la caja que toca colocar (solo si el juego sigue en
+    // curso). Sirve de pista visual para el jugador en la sala 3D.
+    if (gReciclaje.active && !gReciclaje.finished && placed < total) {
+        int nextColor = gReciclaje.sequence[placed];
+        glm::vec4 c = RECICLAJE_COLORS[nextColor];
+        float pulse = 0.6f + 0.4f * sinf((float)glfwGetTime() * 4.5f);
+        SetMaterial(phongShader, c * 0.35f, c, glm::vec4(0.8f, 0.8f, 0.8f, 1.0f), 32);
+        glm::vec3 p = RECICLAJE_TOWER_BASE +
+                      glm::vec3(0.0f, placed * RECICLAJE_LAYER_H + 0.5f, 0.0f);
+        glm::mat4 m(1.0f);
+        m = glm::translate(m, p);
+        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        m = glm::scale(m, glm::vec3(0.10f * pulse));
+        phongShader->setMat4("model", m);
+        CAJA_MODELO->Draw(*phongShader);
+    }
+}
+
+// HUD del minijuego de reciclaje. Mismo estilo (panel oscuro con borde
+// dorado + fila de chips de color + linea de estado) que el HUD de
+// hamburguesa y simon, para que el modulo se sienta parte del mismo set.
+void DrawReciclajeHUD() {
+    if (!hudShader) return;
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float panelW = 660.0f;
+    if (panelW > (float)SCR_WIDTH - 80.0f) panelW = (float)SCR_WIDTH - 80.0f;
+    float panelH = 138.0f;
+    float panelX = (SCR_WIDTH - panelW) * 0.5f;
+    float panelY = (float)SCR_HEIGHT - panelH - 26.0f;
+
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, panelH + 12.0f,
+               glm::vec4(0.03f, 0.05f, 0.10f, 0.85f));
+    DrawQuad2D(panelX - 6.0f, panelY + panelH + 3.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+    DrawQuad2D(panelX - 6.0f, panelY - 6.0f, panelW + 12.0f, 3.0f,
+               glm::vec4(0.92f, 0.78f, 0.35f, 0.9f));
+
+    // Fila de chips: uno por caja de la secuencia. Los chips ya colocados
+    // se ven con su color completo; el chip siguiente pulsa para guiar al
+    // jugador; los pendientes futuros se ven mas tenues.
+    int n = (int)gReciclaje.sequence.size();
+    if (n <= 0) n = 1;
+    float chipW = 50.0f;
+    float chipH = 30.0f;
+    float chipGap = 6.0f;
+    float chipsTotal = chipW * n + chipGap * (n - 1);
+    if (chipsTotal > panelW - 20.0f) {
+        chipW   = (panelW - 20.0f - chipGap * (n - 1)) / n;
+        chipsTotal = chipW * n + chipGap * (n - 1);
+    }
+    float chipX0 = panelX + (panelW - chipsTotal) * 0.5f;
+    float chipY  = panelY + panelH - chipH - 14.0f;
+    float tNow = (float)glfwGetTime();
+    for (int i = 0; i < (int)gReciclaje.sequence.size(); ++i) {
+        int colorIdx = gReciclaje.sequence[i];
+        glm::vec4 base = RECICLAJE_COLORS[colorIdx];
+        bool placed = (i < gReciclaje.step);
+        bool isNext = (i == gReciclaje.step) && !gReciclaje.finished;
+        float pulse = 0.55f + 0.20f * sinf(tNow * 2.6f + i * 1.1f);
+
+        glm::vec4 bg = base;
+        if (placed) {
+            bg.r *= 0.95f; bg.g *= 0.95f; bg.b *= 0.95f; bg.a = 0.92f;
+        } else if (isNext) {
+            float k = 0.70f + 0.30f * pulse;
+            bg.r *= k; bg.g *= k; bg.b *= k;
+            bg.a = 0.95f;
+        } else {
+            bg.r *= 0.28f; bg.g *= 0.28f; bg.b *= 0.28f; bg.a = 0.55f;
+        }
+        float cx = chipX0 + i * (chipW + chipGap);
+        DrawQuad2D(cx, chipY, chipW, chipH, bg);
+        float edge = isNext ? (0.55f + 0.45f * pulse) : (placed ? 0.50f : 0.18f);
+        DrawQuad2D(cx, chipY + chipH - 3.0f, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+        DrawQuad2D(cx, chipY, chipW, 3.0f,
+                   glm::vec4(base.r, base.g, base.b, edge));
+
+        if (gText && gText->ready) {
+            // Iniciales: M / V / C dentro del chip, suficientes para
+            // distinguir el color sin saturar la fila.
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%c", RECICLAJE_NAMES[colorIdx][0]);
+            float scale = 0.34f;
+            float w = gText->MeasureWidth(buf, scale);
+            if (w > chipW - 6.0f) { scale = 0.26f; w = gText->MeasureWidth(buf, scale); }
+            gText->RenderText(buf, cx + (chipW - w) * 0.5f, chipY + 8.0f,
+                              scale, glm::vec3(0.98f, 0.98f, 1.00f));
+        }
+    }
+
+    if (!gText || !gText->ready) {
+        glEnable(GL_DEPTH_TEST);
+        return;
+    }
+
+    // Linea 1: progreso / score / hits / misses / combo / reloj.
+    int total = (int)gReciclaje.sequence.size();
+    char line1[220];
+    if (gReciclaje.timeLimit > 0.0f) {
+        snprintf(line1, sizeof(line1),
+                 "Cajas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d  |  Tiempo %.1fs",
+                 gReciclaje.step, total,
+                 gReciclaje.score, gReciclaje.hits, gReciclaje.misses,
+                 gReciclaje.combo, gReciclaje.maxCombo,
+                 gReciclaje.timeLeft);
+    } else {
+        snprintf(line1, sizeof(line1),
+                 "Cajas %d/%d  |  Score %d  |  Aciertos %d  |  Fallos %d  |  Combo %d / Mejor %d",
+                 gReciclaje.step, total,
+                 gReciclaje.score, gReciclaje.hits, gReciclaje.misses,
+                 gReciclaje.combo, gReciclaje.maxCombo);
+    }
+    float s1 = 0.33f;
+    float w1 = gText->MeasureWidth(line1, s1);
+    if (w1 > panelW - 20.0f) { s1 = 0.28f; w1 = gText->MeasureWidth(line1, s1); }
+    gText->RenderText(line1, panelX + (panelW - w1) * 0.5f, panelY + 56.0f,
+                      s1, glm::vec3(0.96f, 0.96f, 1.0f));
+
+    // Linea 2: estado / siguiente caja / feedback rojo en error.
+    char line2[200];
+    glm::vec3 stateCol = glm::vec3(0.75f, 0.82f, 0.96f);
+    if (gReciclaje.finished && !gReciclaje.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "TORRE COMPLETA  -  Score final %d   |   TAB para cerrar",
+                 gReciclaje.score);
+        stateCol = glm::vec3(0.60f, 0.95f, 0.65f);
+    } else if (gReciclaje.failedByTime) {
+        snprintf(line2, sizeof(line2),
+                 "TIEMPO AGOTADO  -  Pulsa B o R para reintentar");
+        stateCol = glm::vec3(0.98f, 0.55f, 0.45f);
+    } else if (gReciclaje.lastWrong && gReciclaje.lastWrongColor >= 0) {
+        snprintf(line2, sizeof(line2),
+                 "Caja incorrecta (%s). Esperaba %s.",
+                 RECICLAJE_NAMES[gReciclaje.lastWrongColor],
+                 RECICLAJE_NAMES[gReciclaje.sequence[gReciclaje.step]]);
+        stateCol = glm::vec3(0.98f, 0.55f, 0.45f);
+    } else if (gReciclaje.step < total) {
+        int nxt = gReciclaje.sequence[gReciclaje.step];
+        snprintf(line2, sizeof(line2),
+                 "Siguiente: %s (tecla %s)   |   TAB interrumpe",
+                 RECICLAJE_NAMES[nxt], RECICLAJE_KEY_HINT[nxt]);
+    } else {
+        snprintf(line2, sizeof(line2), "Preparando torre...");
+    }
+    float s2 = 0.30f;
+    float w2 = gText->MeasureWidth(line2, s2);
+    if (w2 > panelW - 20.0f) { s2 = 0.26f; w2 = gText->MeasureWidth(line2, s2); }
+    gText->RenderText(line2, panelX + (panelW - w2) * 0.5f, panelY + 28.0f,
+                      s2, stateCol);
+
+    glEnable(GL_DEPTH_TEST);
 }
 
 // ============ HAMBURGUESA (CAPSULAS) ============
